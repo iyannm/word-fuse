@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: word-fuse-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DICTIONARY_ENABLED
+        value: "true"
+      - key: CLIENT_ORIGIN
+        sync: false

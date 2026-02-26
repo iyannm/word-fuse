@@ -21,7 +21,12 @@ export function sanitizePlayerName(input: string): string {
 }
 
 export function sanitizeWord(input: string): string {
-  return input.trim().toLowerCase();
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^A-Za-z]/g, "")
+    .toLowerCase();
 }
 
 export function createRoomCode(existingCodes: Set<string>): string {

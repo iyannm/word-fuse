@@ -57,6 +57,15 @@ function sortedScoreboard(players: PublicPlayerState[]): PublicPlayerState[] {
   });
 }
 
+function normalizeWordForSubmit(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
 interface HomeViewProps {
@@ -255,6 +264,10 @@ function GameView(props: GameViewProps): JSX.Element {
           maxLength={30}
           placeholder={props.canSubmit ? "Type a word" : "Wait for your turn"}
           disabled={!props.canSubmit}
+          autoCapitalize="none"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
         />
         <button type="submit" disabled={!props.canSubmit || props.wordDraft.trim().length === 0}>
           Submit
@@ -564,7 +577,7 @@ export default function App(): JSX.Element {
       return;
     }
 
-    const word = wordDraft.trim();
+    const word = normalizeWordForSubmit(wordDraft);
     if (!word) {
       return;
     }

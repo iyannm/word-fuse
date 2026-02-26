@@ -249,7 +249,7 @@ export class GameService {
       const next = this.getNextEligiblePlayer(room, null);
       if (next) {
         room.activePlayerId = next.id;
-        room.currentChunk = this.chooseChunk(room.currentChunk);
+        room.currentChunk = this.chooseChunk(room, room.currentChunk);
         room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
       }
     }
@@ -353,7 +353,7 @@ export class GameService {
     }
 
     room.activePlayerId = firstActive.id;
-    room.currentChunk = this.chooseChunk(null);
+    room.currentChunk = this.chooseChunk(room, null);
     room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
     room.lastEvent = `${firstActive.name} starts with the bomb.`;
     room.updatedAt = Date.now();
@@ -610,7 +610,7 @@ export class GameService {
 
     room.activePlayerId = next.id;
     room.previousChunk = room.currentChunk;
-    room.currentChunk = this.chooseChunk(room.previousChunk);
+    room.currentChunk = this.chooseChunk(room, room.previousChunk);
     room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
   }
 
@@ -625,9 +625,17 @@ export class GameService {
     room.lastEvent = winner ? `${winner.name} wins the match.` : "Match ended.";
   }
 
-  private chooseChunk(previousChunk: string | null): string {
+  private chooseChunk(room: RoomState, previousChunk: string | null): string {
     const pool = CHUNKS.filter((chunk) => chunk !== previousChunk);
-    const source = pool.length > 0 ? pool : CHUNKS;
+    const sourcePool = pool.length > 0 ? pool : CHUNKS;
+    if (!room.config.dictionaryEnabled) {
+      return sourcePool[Math.floor(Math.random() * sourcePool.length)];
+    }
+
+    const viablePool = sourcePool.filter((chunk) =>
+      this.dictionary.hasAnyForChunk(chunk, room.usedWords),
+    );
+    const source = viablePool.length > 0 ? viablePool : sourcePool;
     return source[Math.floor(Math.random() * source.length)];
   }
 

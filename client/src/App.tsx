@@ -13,7 +13,6 @@ import {
   MonitorPlay,
   Palmtree,
   RadioTower,
-  Shield,
   Skull,
   Sparkles,
   Swords,
@@ -275,11 +274,50 @@ function RoleTag(props: { label: string; tone?: "default" | "cyan" | "orange" | 
   return <span className={`badge ${toneClass}`}>{props.label}</span>;
 }
 
-function Avatar(props: { name: string }): JSX.Element {
+function Avatar(props: { name: string; size?: "sm" | "md" }): JSX.Element {
+  const sizeClass =
+    props.size === "sm"
+      ? "size-10 text-xs tracking-[0.16em]"
+      : "size-12 text-sm tracking-[0.18em]";
+
   return (
-    <div className="flex size-12 shrink-0 items-center justify-center rounded-full border border-neonCyan/25 bg-neonCyan/10 font-display text-sm tracking-[0.18em] text-neonCyan">
+    <div
+      className={`flex shrink-0 items-center justify-center rounded-full border border-neonCyan/25 bg-neonCyan/10 font-display text-neonCyan ${sizeClass}`}
+    >
       {playerInitials(props.name)}
     </div>
+  );
+}
+
+function LivesIndicator(props: {
+  lives: number;
+  eliminated?: boolean;
+  spectator?: boolean;
+}): JSX.Element {
+  if (props.spectator) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-sand/50">
+        <MonitorPlay className="size-3.5" aria-hidden="true" />
+        Spec
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={`arcade-mono inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${
+        props.eliminated
+          ? "border-white/10 bg-white/5 text-sand/42"
+          : "border-sunsetOrange/35 bg-sunsetOrange/10 text-sand/84"
+      }`}
+    >
+      <Heart
+        className={`size-3.5 ${props.eliminated ? "text-danger/60" : "text-sunsetOrange"}`}
+        fill={props.eliminated ? "rgba(255,91,126,0.1)" : "rgba(255,155,84,0.12)"}
+        aria-hidden="true"
+      />
+      {props.lives}
+    </span>
   );
 }
 
@@ -769,6 +807,90 @@ interface TimerRingProps {
   turnNumber: number;
 }
 
+interface GameHudBarProps {
+  roomCode: string;
+  activeTurnLabel: string;
+  isYourTurn: boolean;
+  connectionStatus: ConnectionStatus;
+  onLeave: () => void;
+}
+
+function GameHudBar(props: GameHudBarProps): JSX.Element {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+
+  useEffect(() => {
+    if (copyState === "idle") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCopyState("idle");
+    }, 1600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [copyState]);
+
+  const handleCopyRoomCode = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(props.roomCode);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  return (
+    <div className="card rounded-2xl border-white/8 bg-ocean/70 px-4 py-3 sm:px-5">
+      <div className="flex flex-wrap items-center gap-3 lg:grid lg:grid-cols-[1fr_auto_1fr] lg:gap-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 lg:justify-self-start">
+          <span className="text-[10px] uppercase tracking-[0.3em] text-sand/42">Room</span>
+          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5">
+            <span className="arcade-mono text-sm font-semibold tracking-[0.32em] text-sand">
+              {props.roomCode}
+            </span>
+            <button
+              className="inline-flex size-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-sand/72 transition hover:border-neonCyan/35 hover:text-neonCyan"
+              type="button"
+              onClick={handleCopyRoomCode}
+              aria-label="Copy room code"
+              title="Copy room code"
+            >
+              <Copy className="size-3.5" aria-hidden="true" />
+            </button>
+          </div>
+          {copyState === "copied" ? (
+            <span className="text-xs text-neonCyan">Copied</span>
+          ) : copyState === "error" ? (
+            <span className="text-xs text-danger">Copy failed</span>
+          ) : null}
+        </div>
+
+        <div className="order-3 w-full lg:order-none lg:w-auto lg:justify-self-center">
+          <div
+            className={`inline-flex w-full items-center justify-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.28em] ${
+              props.isYourTurn
+                ? "border-neonCyan/35 bg-neonCyan/12 text-neonCyan"
+                : "border-white/10 bg-white/6 text-sand/78"
+            }`}
+          >
+            {props.isYourTurn ? <Sparkles className="size-4" aria-hidden="true" /> : null}
+            {props.isYourTurn ? "Your Turn" : props.activeTurnLabel}
+          </div>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2 lg:ml-0 lg:justify-self-end">
+          <ConnectionPill status={props.connectionStatus} />
+          <button className="btn-ghost px-3 py-2 text-xs" type="button" onClick={props.onLeave}>
+            Leave
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TimerRing(props: TimerRingProps): JSX.Element {
   const [remainingMs, setRemainingMs] = useState(() => Math.max(0, props.remainingMs));
 
@@ -796,7 +918,7 @@ function TimerRing(props: TimerRingProps): JSX.Element {
 
   return (
     <>
-      <div className="pointer-events-none absolute right-4 top-4 z-20">
+      <div className="pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-[8.9rem] sm:-translate-y-[10rem]">
         <div
           className={`arcade-mono rounded-full border px-4 py-2 text-sm font-semibold ${
             secondsLeft <= 3
@@ -810,7 +932,7 @@ function TimerRing(props: TimerRingProps): JSX.Element {
 
       <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
         <svg
-          className="h-[19rem] w-[19rem] sm:h-[22rem] sm:w-[22rem]"
+          className="h-[18rem] w-[18rem] sm:h-[21rem] sm:w-[21rem] lg:h-[22rem] lg:w-[22rem]"
           viewBox="0 0 320 320"
           fill="none"
           aria-hidden="true"
@@ -859,100 +981,85 @@ function TurnOrderRow(props: TurnOrderRowProps): JSX.Element {
 
   return (
     <div className="space-y-4">
-      <div>
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">Turn Row</p>
-            <p className="mt-2 text-sm text-sand/58">Swipe on mobile to scan the live order.</p>
-          </div>
-          <RoleTag label={`Turn ${props.roomState.turnNumber}`} tone="cyan" />
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">Turn Row</p>
+          <p className="mt-1 text-xs text-sand/58">Scroll to track the live order.</p>
         </div>
-
-        <div className="flex gap-3 overflow-x-auto pb-2">
-          {players.map((player, index) => {
-            const isActive = player.id === props.roomState.activePlayerId;
-            const isLocalPlayer = player.id === props.session.playerId;
-            const isEliminated = isPlayerOut(player);
-
-            return (
-              <div
-                key={player.id}
-                className={`chip min-w-[220px] shrink-0 ${
-                  isActive ? "chip-active motion-safe:animate-chip-pulse" : ""
-                } ${isEliminated ? "border-white/10 bg-white/5 opacity-50" : "bg-white/8"} ${
-                  isActive && !isEliminated ? "scale-[1.01]" : ""
-                }`}
-                role="listitem"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <Avatar name={player.name} />
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`text-base font-semibold text-sand ${
-                            isEliminated ? "line-through decoration-danger/70" : ""
-                          }`}
-                        >
-                          {player.name}
-                        </span>
-                        {isLocalPlayer ? <RoleTag label="You" tone="cyan" /> : null}
-                        {isEliminated ? <RoleTag label="Out" tone="danger" /> : null}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {isActive ? (
-                          <>
-                            <RoleTag label="Active" tone="orange" />
-                            <RoleTag label={`#${props.roomState.turnNumber}`} tone="cyan" />
-                          </>
-                        ) : (
-                          <RoleTag label={`Slot ${index + 1}`} />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex size-11 items-center justify-center rounded-2xl border border-current/15 bg-black/15 text-sand/70">
-                    {isActive ? <Zap className="size-5 text-neonCyan" aria-hidden="true" /> : <Shield className="size-5" aria-hidden="true" />}
-                  </div>
-                </div>
-
-                <div className="mt-4 flex items-center justify-between gap-3 text-sm">
-                  <span className="truncate text-sand/60">{player.lastWord || "No last word yet"}</span>
-                  <span className="arcade-mono text-sand/75">{player.lives} lives</span>
-                </div>
-              </div>
-            );
-          })}
+        <div className="flex items-center gap-2">
+          {spectators.length > 0 ? (
+            <RoleTag label={`${spectators.length} Spectator${spectators.length === 1 ? "" : "s"}`} />
+          ) : null}
+          <RoleTag label={`Turn ${props.roomState.turnNumber}`} tone="cyan" />
         </div>
       </div>
 
+      <div className="flex gap-3 overflow-x-auto pb-1">
+        {players.map((player) => {
+          const isActive = player.id === props.roomState.activePlayerId;
+          const isLocalPlayer = player.id === props.session.playerId;
+          const isEliminated = isPlayerOut(player);
+
+          return (
+            <div
+              key={player.id}
+              className={`chip min-w-[188px] shrink-0 px-4 py-3 ${
+                isActive && !isEliminated ? "chip-active motion-safe:animate-chip-pulse" : "bg-white/5"
+              } ${isEliminated ? "border-white/10 bg-white/5 opacity-55" : ""}`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <Avatar name={player.name} size="sm" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`truncate text-sm font-semibold text-sand ${
+                          isEliminated ? "line-through decoration-danger/70" : ""
+                        }`}
+                      >
+                        {player.name}
+                      </span>
+                      {isLocalPlayer ? <RoleTag label="You" tone="cyan" /> : null}
+                      {isEliminated ? (
+                        <RoleTag label="Out" tone="danger" />
+                      ) : isActive ? (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-neonCyan/35 bg-neonCyan/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-neonCyan">
+                          <span className="size-1.5 rounded-full bg-neonCyan" />
+                          Active
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 truncate text-xs text-sand/50">
+                      {isEliminated ? "Watching the round out" : player.lastWord || "No word yet"}
+                    </p>
+                  </div>
+                </div>
+
+                <LivesIndicator lives={player.lives} eliminated={isEliminated} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {spectators.length > 0 ? (
-        <div>
-          <div className="mb-3 flex items-center gap-2 text-xs uppercase tracking-[0.3em] text-sand/46">
+        <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-sand/46">
             <MonitorPlay className="size-4 text-sand/55" aria-hidden="true" />
             Spectators
           </div>
-          <div className="flex gap-3 overflow-x-auto pb-2">
+          <div className="mt-3 flex flex-wrap gap-2">
             {spectators.map((player) => (
-              <div key={player.id} className="chip min-w-[220px] shrink-0 border-white/10 bg-white/5 opacity-80">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <Avatar name={player.name} />
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-base font-semibold text-sand">{player.name}</span>
-                        {player.id === props.session.playerId ? <RoleTag label="You" tone="cyan" /> : null}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <RoleTag label="Spectator" />
-                        {!player.connected ? <RoleTag label="Offline" tone="danger" /> : null}
-                      </div>
-                    </div>
-                  </div>
-                  <MonitorPlay className="size-5 text-sand/55" aria-hidden="true" />
-                </div>
-                <p className="mt-4 text-sm text-sand/52">Never active. Watching the live turn loop.</p>
+              <div
+                key={player.id}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/15 px-3 py-2 text-xs text-sand/72"
+              >
+                <span className="flex size-7 items-center justify-center rounded-full border border-neonCyan/20 bg-neonCyan/10 font-display text-[10px] tracking-[0.16em] text-neonCyan">
+                  {playerInitials(player.name)}
+                </span>
+                <span className="font-semibold text-sand">{player.name}</span>
+                {player.id === props.session.playerId ? <RoleTag label="You" tone="cyan" /> : null}
+                {!player.connected ? <RoleTag label="Offline" tone="danger" /> : null}
               </div>
             ))}
           </div>
@@ -968,6 +1075,7 @@ interface ScoreboardPanelProps {
   session: Session;
   isHost?: boolean;
   onToggleTypingPreviews?: (enabled: boolean) => void;
+  mobileCollapsible?: boolean;
 }
 
 function ScoreboardPlayerCard(props: {
@@ -1007,7 +1115,7 @@ function ScoreboardPlayerCard(props: {
 
   return (
     <div
-      className={`rounded-3xl border p-4 ${
+      className={`rounded-2xl border px-4 py-3 ${
         eliminated
           ? "border-white/10 bg-white/5 opacity-60"
           : isActive
@@ -1015,65 +1123,45 @@ function ScoreboardPlayerCard(props: {
             : "border-white/10 bg-white/6"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Avatar name={props.player.name} />
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={`text-base font-semibold text-sand ${
-                  eliminated ? "line-through decoration-danger/70" : ""
-                }`}
-              >
-                {props.player.name}
-              </span>
-              {isLocalPlayer ? <RoleTag label="You" tone="cyan" /> : null}
-              {isActive && !spectator && !eliminated ? <RoleTag label="Turn" tone="orange" /> : null}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <RoleTag label={spectator ? "Spectator" : "Player"} />
-              {eliminated ? <RoleTag label="Eliminated" tone="danger" /> : null}
-            </div>
+      <div className="flex items-center gap-3">
+        <Avatar name={props.player.name} size="sm" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`truncate text-sm font-semibold text-sand ${
+                eliminated ? "line-through decoration-danger/70" : ""
+              }`}
+            >
+              {props.player.name}
+            </span>
+            {isLocalPlayer ? <RoleTag label="You" tone="cyan" /> : null}
+            {spectator ? <RoleTag label="Spectator" /> : null}
+            {eliminated ? <RoleTag label="Out" tone="danger" /> : null}
+            {isActive && !spectator && !eliminated ? <RoleTag label="Active" tone="orange" /> : null}
           </div>
-        </div>
 
-        <div className="flex items-center gap-2 text-sand/65">
-          {eliminated ? <Skull className="size-5 text-danger" aria-hidden="true" /> : <Heart className="size-5 text-sunsetOrange" aria-hidden="true" />}
-          <span className="arcade-mono text-sm font-semibold">{spectator ? "--" : props.player.lives}</span>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-sand/42">Last Word</p>
           <div
-            className={`mt-2 inline-flex max-w-full items-center rounded-full border px-3 py-2 text-sm ${
+            className={`mt-2 inline-flex max-w-full items-center rounded-full border px-3 py-1.5 text-xs ${
               isFlashing ? "score-flash border-neonCyan/30 bg-neonCyan/12" : "border-white/10 bg-black/15"
             } ${spectator ? "text-sand/45" : "text-sand/82"}`}
           >
-            <span className="truncate">{spectator ? "Host controls only" : props.player.lastWord || "Waiting..."}</span>
+            <span className="truncate">
+              {spectator ? "Watching only" : props.player.lastWord || "Waiting..."}
+            </span>
           </div>
         </div>
 
-        <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-sand/42">Lives</p>
-          <div className="mt-2 flex items-center gap-2">
-            {spectator ? (
-              <MonitorPlay className="size-4 text-sand/50" aria-hidden="true" />
-            ) : (
-              <div className="flex items-center gap-1">
-                {Array.from({ length: Math.max(props.player.lives, 0) }).map((_, index) => (
-                  <Heart
-                    key={`${props.player.id}-life-${index}`}
-                    className="size-4 text-sunsetOrange"
-                    fill="rgba(255,155,84,0.14)"
-                    aria-hidden="true"
-                  />
-                ))}
-              </div>
-            )}
-            <span className="arcade-mono text-sm text-sand/78">{spectator ? "--" : props.player.lives}</span>
-          </div>
+        <div className="shrink-0">
+          {spectator ? (
+            <LivesIndicator lives={0} spectator />
+          ) : eliminated ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-danger/25 bg-danger/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-danger">
+              <Skull className="size-3.5" aria-hidden="true" />
+              Out
+            </span>
+          ) : (
+            <LivesIndicator lives={props.player.lives} />
+          )}
         </div>
       </div>
     </div>
@@ -1081,38 +1169,57 @@ function ScoreboardPlayerCard(props: {
 }
 
 function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
+  const [mobileOpen, setMobileOpen] = useState(false);
+
   return (
-    <div className="card px-5 py-5 sm:px-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+    <div className="card px-4 py-4 sm:px-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-sunsetOrange/80">Survival Board</p>
-          <h3 className="mt-2 text-2xl font-semibold text-sand">{props.title}</h3>
+          <h3 className="mt-1 text-xl font-semibold text-sand">{props.title}</h3>
         </div>
 
-        {props.onToggleTypingPreviews ? (
-          props.isHost ? (
+        <div className="flex items-center gap-2">
+          {props.onToggleTypingPreviews ? (
+            props.isHost ? (
+              <button
+                className="btn-ghost px-3 py-2 text-[11px]"
+                type="button"
+                onClick={() => props.onToggleTypingPreviews?.(!props.roomState.config.showTypingPreviews)}
+              >
+                {props.roomState.config.showTypingPreviews ? (
+                  <Eye className="size-4" aria-hidden="true" />
+                ) : (
+                  <EyeOff className="size-4" aria-hidden="true" />
+                )}
+                {props.roomState.config.showTypingPreviews ? "Hide Preview" : "Show Preview"}
+              </button>
+            ) : (
+              <RoleTag
+                label={props.roomState.config.showTypingPreviews ? "Previews Live" : "Previews Hidden"}
+                tone="cyan"
+              />
+            )
+          ) : null}
+
+          {props.mobileCollapsible ? (
             <button
-              className="btn-ghost px-3 py-2 text-xs"
+              className="btn-ghost px-3 py-2 text-[11px] lg:hidden"
               type="button"
-              onClick={() => props.onToggleTypingPreviews?.(!props.roomState.config.showTypingPreviews)}
+              onClick={() => setMobileOpen((current) => !current)}
             >
-              {props.roomState.config.showTypingPreviews ? (
-                <Eye className="size-4" aria-hidden="true" />
+              {mobileOpen ? (
+                <ChevronUp className="size-4" aria-hidden="true" />
               ) : (
-                <EyeOff className="size-4" aria-hidden="true" />
+                <ChevronDown className="size-4" aria-hidden="true" />
               )}
-              {props.roomState.config.showTypingPreviews ? "Hide Previews" : "Show Previews"}
+              {mobileOpen ? "Hide Board" : "Show Board"}
             </button>
-          ) : (
-            <RoleTag
-              label={props.roomState.config.showTypingPreviews ? "Previews Live" : "Previews Hidden"}
-              tone="cyan"
-            />
-          )
-        ) : null}
+          ) : null}
+        </div>
       </div>
 
-      <div className="mt-5 space-y-3">
+      <div className={`${props.mobileCollapsible && !mobileOpen ? "hidden lg:block" : ""} mt-4 space-y-2.5`}>
         {orderedScoreboardPlayers(props.roomState.players).map((player) => (
           <ScoreboardPlayerCard
             key={player.id}
@@ -1141,7 +1248,6 @@ interface GameViewProps {
   isHost: boolean;
   isYourTurn: boolean;
   wordInputRef: RefObject<HTMLInputElement>;
-  onLeave: () => void;
 }
 
 function GameView(props: GameViewProps): JSX.Element {
@@ -1160,6 +1266,7 @@ function GameView(props: GameViewProps): JSX.Element {
   const targetDifficultyLabel = props.roomState.globalDifficultyTier
     ? TIER_LABELS[props.roomState.globalDifficultyTier]
     : null;
+  const chunkLengthLabel = props.roomState.config.allowFourLetterChunks ? "2-4 letters" : "2-3 letters";
 
   const typingPreviewText = props.typingState.isTyping
     ? props.roomState.config.showTypingPreviews
@@ -1221,33 +1328,33 @@ function GameView(props: GameViewProps): JSX.Element {
   }, [props.errorMessage, props.errorVersion]);
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="space-y-6">
-        <div className="card px-5 py-5 sm:px-6">
+    <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+      <div className="space-y-4">
+        <div className="card px-4 py-4 sm:px-5">
           <TurnOrderRow roomState={props.roomState} session={props.session} />
         </div>
 
         {localPlayerOut ? (
           <div
-            className="card border-danger/45 bg-danger/12 px-6 py-4 text-center text-lg font-semibold uppercase tracking-[0.26em] text-danger"
+            className="rounded-2xl border border-danger/35 bg-danger/10 px-4 py-3 text-center text-sm font-semibold uppercase tracking-[0.26em] text-danger"
             role="status"
             aria-live="polite"
           >
-            You Are Out
+            You are out this round
           </div>
         ) : null}
 
         <div
-          className={`panel-turn px-5 py-6 sm:px-7 sm:py-7 ${
+          className={`panel-turn min-h-[30rem] px-4 py-5 sm:px-6 sm:py-6 lg:min-h-[34rem] ${
             props.isYourTurn ? "panel-turn-active motion-safe:animate-panel-pulse" : ""
           } ${panelFeedback === "pass" ? "panel-turn-pass motion-safe:animate-pass-burst" : ""} ${
             panelFeedback === "boom" ? "panel-turn-boom motion-safe:animate-boom-flash" : ""
           }`}
         >
-          <div className="relative z-10 flex flex-col items-center text-center">
-            <div className="mb-5 flex w-full justify-center">
+          <div className="relative z-10 flex h-full flex-col items-center text-center">
+            <div className="flex w-full justify-center">
               <div
-                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold uppercase tracking-[0.32em] ${
+                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.32em] ${
                   props.isYourTurn
                     ? "border-neonCyan/40 bg-neonCyan/12 text-neonCyan"
                     : "border-white/15 bg-white/8 text-sand/78"
@@ -1266,26 +1373,26 @@ function GameView(props: GameViewProps): JSX.Element {
               </div>
             </div>
 
-            <div className="relative flex min-h-[22rem] w-full items-center justify-center sm:min-h-[24rem]">
+            <div className="relative flex w-full flex-1 items-center justify-center py-6 sm:py-8">
               <TimerRing
                 remainingMs={props.roomState.remainingMs}
                 turnDurationSeconds={props.roomState.turnDurationSeconds}
                 turnNumber={props.roomState.turnNumber}
               />
 
-              <div className="relative z-10 max-w-[32rem]">
+              <div className="relative z-10 flex max-w-[32rem] flex-col items-center">
                 <div className="inline-flex flex-wrap items-end justify-center gap-3">
                   <span className="font-display text-[clamp(5rem,18vw,9rem)] uppercase leading-none text-sand text-shadow-neon">
                     {props.roomState.currentChunk ?? "--"}
                   </span>
                   {chunkTierLabel ? (
-                    <span className="mb-4 inline-flex items-center rounded-full border border-white/10 bg-black/20 px-3 py-2 text-sm uppercase tracking-[0.24em] text-sand/72">
+                    <span className="hidden">
                       {chunkTierLabel} • {chunkCoverageLabel}
                     </span>
                   ) : null}
                 </div>
 
-                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                <div className="hidden">
                   <RoleTag label={`Turn ${props.roomState.turnNumber}`} tone="cyan" />
                   <RoleTag label={`${props.roomState.turnDurationSeconds}s`} />
                   <RoleTag
@@ -1296,13 +1403,24 @@ function GameView(props: GameViewProps): JSX.Element {
                     <RoleTag label={`Stage ${props.roomState.globalStageIndex + 1}`} />
                   ) : null}
                 </div>
+
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  {chunkTierLabel ? (
+                    <span className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/72">
+                      {chunkTierLabel} | {chunkCoverageLabel}
+                    </span>
+                  ) : null}
+                  <span className="rounded-full border border-white/10 bg-black/15 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/60">
+                    {chunkLengthLabel}
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div className="mt-2 w-full max-w-3xl">
+            <div className="w-full max-w-3xl">
               <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">{typingLabel}</p>
               <div
-                className={`mt-4 font-display text-[clamp(2rem,8vw,4.5rem)] uppercase leading-tight ${
+                className={`mt-4 font-display text-[clamp(2.5rem,7vw,5rem)] uppercase leading-[0.92] ${
                   props.typingState.isTyping ? "text-sand text-shadow-neon" : "text-sand/32"
                 }`}
                 aria-live="polite"
@@ -1313,11 +1431,11 @@ function GameView(props: GameViewProps): JSX.Element {
           </div>
         </div>
 
-        <form className="card px-5 py-5 sm:px-6" onSubmit={props.onSubmitWord}>
-          <div className="flex flex-col gap-4 sm:flex-row">
+        <form className="card px-4 py-4 sm:px-5" onSubmit={props.onSubmitWord}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
               ref={props.wordInputRef}
-              className={`arcade-input flex-1 px-5 py-4 text-lg ${
+              className={`arcade-input flex-1 px-5 py-4 text-base sm:text-lg ${
                 props.isYourTurn ? "shadow-glow-cyan" : ""
               } ${
                 inputRejected
@@ -1344,66 +1462,67 @@ function GameView(props: GameViewProps): JSX.Element {
               className="btn-primary px-6 text-base sm:min-w-[168px]"
               type="submit"
               disabled={localPlayerOut || !props.canSubmit || props.wordDraft.trim().length === 0}
+              title={!props.canSubmit && !localPlayerOut ? "Wait for your turn to submit." : undefined}
             >
               <Zap className="size-4" aria-hidden="true" />
               Submit Word
             </button>
           </div>
 
-          <div className="mt-4 flex flex-col gap-3 text-sm text-sand/58 sm:flex-row sm:items-center sm:justify-between">
-            <p>
-              {localPlayerOut
-                ? "You can keep watching, but submit controls are disabled."
-                : props.canSubmit
-                  ? "Fuse a valid word before the timer burns out."
-                  : "Only the active player can submit. Local practice stays on your device."}
-            </p>
-            <button className="btn-ghost self-start px-3 py-2 text-xs sm:self-auto" type="button" onClick={props.onLeave}>
-              Leave Room
-            </button>
-          </div>
+          <p className="mt-3 text-xs text-sand/54 sm:text-sm">
+            {localPlayerOut
+              ? "Spectating only until the next round."
+              : props.canSubmit
+                ? "Submit one valid word containing the live chunk."
+                : "Submit unlocks when the bomb reaches you."}
+          </p>
         </form>
       </div>
 
-      <aside className="space-y-6">
+      <aside className="space-y-4">
         <ScoreboardPanel
           title="Scoreboard"
           roomState={props.roomState}
           session={props.session}
           isHost={props.isHost}
           onToggleTypingPreviews={props.onToggleTypingPreviews}
+          mobileCollapsible
         />
 
-        <div className="card px-5 py-5 sm:px-6">
+        <div className="card px-4 py-4 sm:px-5">
           <p className="text-xs uppercase tracking-[0.3em] text-neonPurple/80">Room Pulse</p>
-          <div className="mt-4 space-y-3">
-            <div className="rounded-3xl border border-white/10 bg-ocean/40 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-sand/42">Room Code</p>
-              <div className="arcade-mono mt-2 text-3xl font-semibold tracking-[0.4em] text-sand">
-                {props.roomState.roomCode}
+          <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
+            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                <TimerReset className="size-4 text-neonCyan" aria-hidden="true" />
+                Turn Timer
               </div>
+              <p className="mt-2 text-sm text-sand/58">{props.roomState.turnDurationSeconds}s per turn</p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <div className="rounded-3xl border border-white/10 bg-ocean/40 p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-sand">
-                  <TimerReset className="size-4 text-neonCyan" aria-hidden="true" />
-                  Turn Timer
-                </div>
-                <p className="mt-2 text-sm text-sand/58">{props.roomState.turnDurationSeconds}s per turn</p>
+
+            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                <Zap className="size-4 text-sunsetOrange" aria-hidden="true" />
+                Chunk Pool
               </div>
-              <div className="rounded-3xl border border-white/10 bg-ocean/40 p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-sand">
-                  {props.roomState.config.showTypingPreviews ? (
-                    <Eye className="size-4 text-success" aria-hidden="true" />
-                  ) : (
-                    <EyeOff className="size-4 text-sunsetOrange" aria-hidden="true" />
-                  )}
-                  Typing Preview
-                </div>
-                <p className="mt-2 text-sm text-sand/58">
-                  {props.roomState.config.showTypingPreviews ? "Visible to everyone." : "Hidden behind typing..."}
-                </p>
+              <p className="mt-2 text-sm text-sand/58">
+                {chunkLengthLabel}
+                {targetDifficultyLabel ? ` | target ${targetDifficultyLabel}` : ""}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                {props.roomState.config.showTypingPreviews ? (
+                  <Eye className="size-4 text-success" aria-hidden="true" />
+                ) : (
+                  <EyeOff className="size-4 text-sunsetOrange" aria-hidden="true" />
+                )}
+                Typing Preview
               </div>
+              <p className="mt-2 text-sm text-sand/58">
+                {props.roomState.config.showTypingPreviews ? "Visible to everyone." : "Hidden behind typing..."}
+              </p>
             </div>
           </div>
         </div>
@@ -1719,6 +1838,12 @@ export default function App(): JSX.Element {
     connectionStatus === "connected" &&
     me?.role === "player" &&
     !me?.eliminated;
+  const isGameplayView = !!(session && roomState && roomState.phase === "in_game");
+  const activeHudPlayer =
+    roomState?.phase === "in_game"
+      ? roomState.players.find((player) => player.id === roomState.activePlayerId) ?? null
+      : null;
+  const activeHudLabel = activeHudPlayer ? formatTurnOwner(activeHudPlayer.name) : "Waiting for turn";
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1962,41 +2087,57 @@ export default function App(): JSX.Element {
       />
       <div className="pointer-events-none absolute inset-0 vignette-mask" />
 
-      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
-        <header className="card card-glow px-5 py-5 sm:px-6">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-            <div>
+      <div
+        className={`relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col ${
+          isGameplayView ? "gap-3 px-4 py-4 sm:px-6 sm:py-5 lg:px-8" : "gap-6 px-4 py-5 sm:px-6 sm:py-6 lg:px-8"
+        }`}
+      >
+        {!isGameplayView ? (
+          <header className="card card-glow px-5 py-5 sm:px-6">
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <RoleTag label="Think Fast" tone="cyan" />
+                  <RoleTag label="Defuse the Bomb" tone="orange" />
+                </div>
+
+                <div className="mt-5 flex items-start gap-4">
+                  <div className="flex size-14 items-center justify-center rounded-[1.75rem] border border-neonCyan/25 bg-neonCyan/10 text-neonCyan shadow-glow-cyan">
+                    <Palmtree className="size-7" aria-hidden="true" />
+                  </div>
+                  <div>
+                    <h1 className="font-display text-4xl uppercase leading-none text-sand text-shadow-neon sm:text-5xl">
+                      Word Fuse
+                    </h1>
+                    <p className="mt-3 max-w-2xl text-sm text-sand/65 sm:text-base">
+                      Multiplayer word game for a fun time.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center gap-3">
-                <RoleTag label="Think Fast" tone="cyan" />
-                <RoleTag label="Defuse the Bomb" tone="orange" />
-              </div>
-
-              <div className="mt-5 flex items-start gap-4">
-                <div className="flex size-14 items-center justify-center rounded-[1.75rem] border border-neonCyan/25 bg-neonCyan/10 text-neonCyan shadow-glow-cyan">
-                  <Palmtree className="size-7" aria-hidden="true" />
+                <div className="badge border-white/10 bg-white/10 text-sand/75">
+                  <Waves className="size-3.5" aria-hidden="true" />
+                  Made in Guam
                 </div>
-                <div>
-                  <h1 className="font-display text-4xl uppercase leading-none text-sand text-shadow-neon sm:text-5xl">
-                    Word Fuse
-                  </h1>
-                  <p className="mt-3 max-w-2xl text-sm text-sand/65 sm:text-base">
-                    Multiplayer word game for a fun time.
-                  </p>
-                </div>
+                <ConnectionPill status={connectionStatus} />
               </div>
             </div>
+          </header>
+        ) : null}
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="badge border-white/10 bg-white/10 text-sand/75">
-                <Waves className="size-3.5" aria-hidden="true" />
-                Made in Guam
-              </div>
-              <ConnectionPill status={connectionStatus} />
-            </div>
-          </div>
-        </header>
+        {isGameplayView && roomState ? (
+          <GameHudBar
+            roomCode={roomState.roomCode}
+            activeTurnLabel={activeHudLabel}
+            isYourTurn={canSubmit}
+            connectionStatus={connectionStatus}
+            onLeave={handleLeaveRoom}
+          />
+        ) : null}
 
-        <div className="space-y-3">
+        <div className={isGameplayView ? "space-y-2" : "space-y-3"}>
           {connectionStatus !== "connected" ? (
             <Banner message="Reconnecting to the server..." tone="warning" />
           ) : null}
@@ -2064,7 +2205,6 @@ export default function App(): JSX.Element {
               isHost={isHost}
               isYourTurn={canSubmit}
               wordInputRef={wordInputRef}
-              onLeave={handleLeaveRoom}
             />
           ) : null}
 

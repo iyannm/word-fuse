@@ -57,3 +57,22 @@ export function createRoomCode(existingCodes: Set<string>): string {
 export function createPlayerId(): string {
   return `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
 }
+
+export function createSeededRandomState(seed: string): number {
+  let hash = 2166136261;
+
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0) || 1;
+}
+
+export function nextSeededRandom(state: number): { state: number; value: number } {
+  const nextState = (Math.imul(state || 1, 1664525) + 1013904223) >>> 0;
+  return {
+    state: nextState || 1,
+    value: nextState / 0x100000000,
+  };
+}

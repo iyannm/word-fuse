@@ -1,10 +1,12 @@
 export type GamePhase = "lobby" | "in_game" | "results";
+export type ChunkTier = "veryEasy" | "easy" | "medium" | "hard" | "veryHard";
 
 export interface RoomConfig {
   turnSeconds: number;
   startingLives: number;
   dictionaryEnabled: boolean;
   showTypingPreviews: boolean;
+  allowFourLetterChunks: boolean;
 }
 
 export interface PublicPlayerState {
@@ -25,6 +27,10 @@ export interface PublicRoomState {
   config: RoomConfig;
   activePlayerId: string | null;
   currentChunk: string | null;
+  currentChunkCoverage: number | null;
+  currentChunkTier: ChunkTier | null;
+  turnNumber: number;
+  turnDurationSeconds: number;
   remainingMs: number;
   usedWords: string[];
   winnerId: string | null;

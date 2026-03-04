@@ -495,6 +495,12 @@ button:disabled {
   line-height: 1.1;
 }
 
+.chunk-stack {
+  display: grid;
+  justify-items: center;
+  gap: 0.1rem;
+}
+
 .chunk {
   font-family: var(--font-display);
   font-size: clamp(2.8rem, 16vw, 5.4rem);
@@ -503,6 +509,31 @@ button:disabled {
   color: #00658c;
   line-height: 1;
   text-shadow: 0 5px 12px rgba(0, 113, 145, 0.26);
+}
+
+.chunk-subscript {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1c617e;
+}
+
+.chunk-subscript.veryHard {
+  color: #8a173f;
+}
+
+.chunk-subscript.hard {
+  color: #a84f12;
+}
+
+.chunk-subscript.medium {
+  color: #0b6d7a;
+}
+
+.chunk-subscript.easy,
+.chunk-subscript.veryEasy {
+  color: #0a7a50;
 }
 
 .timer {
@@ -515,6 +546,24 @@ button:disabled {
 .timer.danger {
   color: var(--danger);
   animation: urgentPulse 0.9s ease-in-out infinite;
+}
+
+.turn-pill-row {
+  margin-top: 0.45rem;
+  display: flex;
+  justify-content: center;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+}
+
+.turn-pill {
+  border-radius: 999px;
+  padding: 0.18rem 0.54rem;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(13, 109, 122, 0.2);
+  color: #205569;
+  font-size: 0.77rem;
+  font-weight: 800;
 }
 
 .active-player {

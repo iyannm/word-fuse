@@ -1,6 +1,7 @@
 import { Server } from "socket.io";
-import { Dictionary } from "./dictionary";
+import { ChunkDescriptor, ChunkPool, Dictionary } from "./dictionary";
 import {
+  ChunkTier,
   PublicTypingState,
   PublicRoomState,
   RoomState,
@@ -15,6 +16,8 @@ import {
   clampInt,
   createPlayerId,
   createRoomCode,
+  createSeededRandomState,
+  nextSeededRandom,
   sanitizePlayerName,
   sanitizeRoomCode,
   sanitizeTypingPreview,
@@ -34,39 +37,9 @@ const SUBMIT_RATE_LIMIT_MS = 300;
 const TYPING_RATE_LIMIT_WINDOW_MS = 1000;
 const MAX_TYPING_EVENTS_PER_WINDOW = 8;
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000;
-
-const CHUNKS = [
-  "AR",
-  "ER",
-  "ING",
-  "TION",
-  "CH",
-  "SH",
-  "TH",
-  "EA",
-  "OU",
-  "ST",
-  "TR",
-  "SP",
-  "CL",
-  "BR",
-  "PL",
-  "GR",
-  "PH",
-  "WH",
-  "CK",
-  "LL",
-  "MENT",
-  "NESS",
-  "ABLE",
-  "FUL",
-  "LESS",
-  "AL",
-  "OR",
-  "EN",
-  "IST",
-  "OUS",
-];
+const CHUNK_COOLDOWN_TURNS = 8;
+const VERY_HARD_INJECTION_CHANCE = 0.1;
+const DIFFICULTY_ORDER: ChunkTier[] = ["veryHard", "hard", "medium", "easy", "veryEasy"];
 
 interface SocketSession {
   roomCode: string;
@@ -124,14 +97,21 @@ export class GameService {
         startingLives: DEFAULT_STARTING_LIVES,
         dictionaryEnabled: this.dictionary.enabled,
         showTypingPreviews: true,
+        allowFourLetterChunks: false,
       },
       players: [host],
       usedWords: new Set<string>(),
       usedWordsOrdered: [],
       activePlayerId: null,
       currentChunk: null,
-      previousChunk: null,
-      timerEndsAt: null,
+      currentChunkCoverage: null,
+      currentChunkTier: null,
+      turnNumber: 0,
+      turnDurationSeconds: 0,
+      turnStartedAt: null,
+      matchStartedAt: null,
+      recentChunks: [],
+      randomState: 1,
       winnerId: null,
       lastEvent: "Room created. Waiting for players.",
       activeTurnTyping: this.createActiveTurnTypingState(null),
@@ -258,10 +238,10 @@ export class GameService {
     if (room.phase === "in_game" && room.activePlayerId === null) {
       const next = this.getNextEligiblePlayer(room, null);
       if (next) {
-        room.activePlayerId = next.id;
-        this.resetActiveTurnTyping(room, next.id);
-        room.currentChunk = this.chooseChunk(room, room.currentChunk);
-        room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
+        const resumedTurnNumber = room.turnNumber > 0 ? room.turnNumber : 1;
+        if (!this.beginTurn(room, next.id, resumedTurnNumber)) {
+          this.finishGame(room, next);
+        }
       }
     }
 
@@ -296,10 +276,14 @@ export class GameService {
     const hasLobbyOnlyUpdates =
       typeof payload.turnSeconds === "number" ||
       typeof payload.startingLives === "number" ||
-      typeof payload.dictionaryEnabled === "boolean";
+      typeof payload.dictionaryEnabled === "boolean" ||
+      typeof payload.allowFourLetterChunks === "boolean";
 
     if (hasLobbyOnlyUpdates && room.phase !== "lobby") {
-      return { ok: false, error: "Turn timer, lives, and dictionary can only be changed in lobby." };
+      return {
+        ok: false,
+        error: "Turn timer, lives, dictionary, and chunk pool settings can only be changed in lobby.",
+      };
     }
 
     if (typeof payload.turnSeconds === "number") {
@@ -320,6 +304,10 @@ export class GameService {
 
     if (typeof payload.showTypingPreviews === "boolean") {
       room.config.showTypingPreviews = payload.showTypingPreviews;
+    }
+
+    if (typeof payload.allowFourLetterChunks === "boolean") {
+      room.config.allowFourLetterChunks = payload.allowFourLetterChunks;
     }
 
     room.updatedAt = Date.now();
@@ -362,7 +350,17 @@ export class GameService {
     room.usedWords.clear();
     room.usedWordsOrdered = [];
     room.winnerId = null;
-    room.previousChunk = null;
+    room.activePlayerId = null;
+    room.currentChunk = null;
+    room.currentChunkCoverage = null;
+    room.currentChunkTier = null;
+    room.turnNumber = 0;
+    room.turnDurationSeconds = 0;
+    room.turnStartedAt = null;
+    room.matchStartedAt = Date.now();
+    room.recentChunks = [];
+    room.randomState = createSeededRandomState(`${room.code}:${room.matchStartedAt}`);
+    room.activeTurnTyping = this.createActiveTurnTypingState(null);
 
     for (const player of room.players) {
       player.score = 0;
@@ -376,10 +374,13 @@ export class GameService {
       return { ok: false, error: "No eligible players to start the game." };
     }
 
-    room.activePlayerId = firstActive.id;
-    this.resetActiveTurnTyping(room, firstActive.id);
-    room.currentChunk = this.chooseChunk(room, null);
-    room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
+    if (!this.beginTurn(room, firstActive.id, 1)) {
+      room.phase = "lobby";
+      room.matchStartedAt = null;
+      room.randomState = 1;
+      return { ok: false, error: "Could not create a chunk pool for this match." };
+    }
+
     room.lastEvent = `${firstActive.name} starts with the bomb.`;
     room.updatedAt = Date.now();
 
@@ -432,7 +433,7 @@ export class GameService {
 
     const chunk = room.currentChunk?.toLowerCase();
     if (!chunk || !word.includes(chunk)) {
-      return { ok: false, error: `Word must include chunk \"${room.currentChunk}\".` };
+      return { ok: false, error: `Word must include chunk "${room.currentChunk}".` };
     }
 
     if (room.usedWords.has(word)) {
@@ -446,7 +447,7 @@ export class GameService {
     room.usedWords.add(word);
     room.usedWordsOrdered.push(word);
     player.score += 1;
-    room.lastEvent = `${player.name} played \"${word}\".`;
+    room.lastEvent = `${player.name} played "${word}".`;
 
     this.advanceTurn(room, player.id);
     room.updatedAt = Date.now();
@@ -480,8 +481,14 @@ export class GameService {
     room.phase = "lobby";
     room.activePlayerId = null;
     room.currentChunk = null;
-    room.previousChunk = null;
-    room.timerEndsAt = null;
+    room.currentChunkCoverage = null;
+    room.currentChunkTier = null;
+    room.turnNumber = 0;
+    room.turnDurationSeconds = 0;
+    room.turnStartedAt = null;
+    room.matchStartedAt = null;
+    room.recentChunks = [];
+    room.randomState = 1;
     room.winnerId = null;
     room.usedWords.clear();
     room.usedWordsOrdered = [];
@@ -622,12 +629,12 @@ export class GameService {
         continue;
       }
 
-      if (!room.activePlayerId || room.timerEndsAt === null) {
+      if (!room.activePlayerId || room.turnStartedAt === null || room.turnDurationSeconds <= 0) {
         continue;
       }
 
       const now = Date.now();
-      if (now >= room.timerEndsAt) {
+      if (now >= this.getTurnEndsAt(room)) {
         this.handleTimerExpiry(room);
       }
 
@@ -688,11 +695,10 @@ export class GameService {
       return;
     }
 
-    room.activePlayerId = next.id;
-    this.resetActiveTurnTyping(room, next.id);
-    room.previousChunk = room.currentChunk;
-    room.currentChunk = this.chooseChunk(room, room.previousChunk);
-    room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
+    const nextTurnNumber = room.turnNumber + 1;
+    if (!this.beginTurn(room, next.id, nextTurnNumber)) {
+      this.finishGame(room, next);
+    }
   }
 
   private finishGame(room: RoomState, winner: PlayerState | null): void {
@@ -700,25 +706,208 @@ export class GameService {
     room.winnerId = winner?.id ?? null;
     room.activePlayerId = null;
     room.currentChunk = null;
-    room.timerEndsAt = null;
+    room.currentChunkCoverage = null;
+    room.currentChunkTier = null;
+    room.turnNumber = 0;
+    room.turnDurationSeconds = 0;
+    room.turnStartedAt = null;
+    room.matchStartedAt = null;
+    room.recentChunks = [];
+    room.randomState = 1;
     room.activeTurnTyping = this.createActiveTurnTypingState(null);
     room.updatedAt = Date.now();
 
     room.lastEvent = winner ? `${winner.name} wins the match.` : "Match ended.";
   }
 
-  private chooseChunk(room: RoomState, previousChunk: string | null): string {
-    const pool = CHUNKS.filter((chunk) => chunk !== previousChunk);
-    const sourcePool = pool.length > 0 ? pool : CHUNKS;
-    if (!room.config.dictionaryEnabled) {
-      return sourcePool[Math.floor(Math.random() * sourcePool.length)];
+  private beginTurn(room: RoomState, activePlayerId: string, turnNumber: number): boolean {
+    const selectedChunk = this.selectNextChunk(room, turnNumber);
+    if (!selectedChunk) {
+      return false;
     }
 
-    const viablePool = sourcePool.filter((chunk) =>
-      this.dictionary.hasAnyForChunk(chunk, room.usedWords),
+    room.activePlayerId = activePlayerId;
+    room.currentChunk = selectedChunk.chunk;
+    room.currentChunkCoverage = selectedChunk.coverage;
+    room.currentChunkTier = selectedChunk.tier;
+    room.turnNumber = turnNumber;
+    room.turnDurationSeconds = this.computeTurnDurationSeconds(room, turnNumber);
+    room.turnStartedAt = Date.now();
+    room.recentChunks = [...room.recentChunks.slice(-(CHUNK_COOLDOWN_TURNS - 1)), selectedChunk.chunk];
+    this.resetActiveTurnTyping(room, activePlayerId);
+
+    return true;
+  }
+
+  private selectNextChunk(room: RoomState, turnNumber: number): ChunkDescriptor | null {
+    const chunkPool = this.getChunkPool(room);
+    if (chunkPool.poolSize === 0) {
+      return null;
+    }
+
+    const forceVeryHard =
+      this.nextRandom(room) < VERY_HARD_INJECTION_CHANCE &&
+      chunkPool.tierChunks.veryHard.length > 0;
+    const primaryTier = forceVeryHard
+      ? "veryHard"
+      : this.pickWeightedTier(room, chunkPool, turnNumber);
+
+    const tiersToTry = [primaryTier, ...this.getFallbackTierOrder(primaryTier)];
+
+    for (const tier of tiersToTry) {
+      const descriptor = this.pickChunkFromTier(room, chunkPool, tier);
+      if (descriptor) {
+        return descriptor;
+      }
+    }
+
+    return this.pickChunkFromPool(room, chunkPool);
+  }
+
+  private pickWeightedTier(room: RoomState, chunkPool: ChunkPool, turnNumber: number): ChunkTier {
+    const weightedTiers = this.getTierWeightsForTurn(turnNumber).filter(
+      (entry) => entry.weight > 0 && chunkPool.tierChunks[entry.tier].length > 0,
     );
-    const source = viablePool.length > 0 ? viablePool : sourcePool;
-    return source[Math.floor(Math.random() * source.length)];
+
+    if (weightedTiers.length === 0) {
+      const fallbackTier = DIFFICULTY_ORDER.find((tier) => chunkPool.tierChunks[tier].length > 0);
+      return fallbackTier ?? "medium";
+    }
+
+    const totalWeight = weightedTiers.reduce((sum, entry) => sum + entry.weight, 0);
+    let roll = this.nextRandom(room) * totalWeight;
+
+    for (const entry of weightedTiers) {
+      if (roll < entry.weight) {
+        return entry.tier;
+      }
+
+      roll -= entry.weight;
+    }
+
+    return weightedTiers[weightedTiers.length - 1].tier;
+  }
+
+  private getTierWeightsForTurn(turnNumber: number): Array<{ tier: ChunkTier; weight: number }> {
+    if (turnNumber <= 5) {
+      return [
+        { tier: "easy", weight: 55 },
+        { tier: "medium", weight: 40 },
+        { tier: "hard", weight: 5 },
+      ];
+    }
+
+    if (turnNumber <= 15) {
+      return [
+        { tier: "medium", weight: 45 },
+        { tier: "hard", weight: 45 },
+        { tier: "veryHard", weight: 10 },
+      ];
+    }
+
+    return [
+      { tier: "hard", weight: 55 },
+      { tier: "veryHard", weight: 40 },
+      { tier: "medium", weight: 5 },
+    ];
+  }
+
+  private getFallbackTierOrder(primaryTier: ChunkTier): ChunkTier[] {
+    const primaryIndex = DIFFICULTY_ORDER.indexOf(primaryTier);
+
+    return DIFFICULTY_ORDER
+      .filter((tier) => tier !== primaryTier)
+      .sort((left, right) => {
+        const leftDistance = Math.abs(DIFFICULTY_ORDER.indexOf(left) - primaryIndex);
+        const rightDistance = Math.abs(DIFFICULTY_ORDER.indexOf(right) - primaryIndex);
+
+        if (leftDistance !== rightDistance) {
+          return leftDistance - rightDistance;
+        }
+
+        return DIFFICULTY_ORDER.indexOf(left) - DIFFICULTY_ORDER.indexOf(right);
+      });
+  }
+
+  private pickChunkFromTier(
+    room: RoomState,
+    chunkPool: ChunkPool,
+    tier: ChunkTier,
+  ): ChunkDescriptor | null {
+    const tierChunks = chunkPool.tierChunks[tier];
+    if (tierChunks.length === 0) {
+      return null;
+    }
+
+    const availableChunks = this.filterChunksByCooldown(tierChunks, room.recentChunks);
+    if (availableChunks.length === 0) {
+      return null;
+    }
+
+    const selectedChunk = availableChunks[Math.floor(this.nextRandom(room) * availableChunks.length)];
+    return chunkPool.chunkMap.get(selectedChunk) ?? null;
+  }
+
+  private pickChunkFromPool(room: RoomState, chunkPool: ChunkPool): ChunkDescriptor | null {
+    const allChunks = DIFFICULTY_ORDER.flatMap((tier) => chunkPool.tierChunks[tier]);
+    const availableChunks = this.filterChunksByCooldown(allChunks, room.recentChunks);
+
+    if (availableChunks.length === 0) {
+      return null;
+    }
+
+    const selectedChunk = availableChunks[Math.floor(this.nextRandom(room) * availableChunks.length)];
+    return chunkPool.chunkMap.get(selectedChunk) ?? null;
+  }
+
+  private filterChunksByCooldown(chunks: string[], recentChunks: string[]): string[] {
+    if (chunks.length === 0) {
+      return [];
+    }
+
+    const immediatePrevious = recentChunks[recentChunks.length - 1] ?? null;
+    let cooldownWindow = recentChunks.slice(-CHUNK_COOLDOWN_TURNS);
+
+    while (true) {
+      const disallowed = new Set(cooldownWindow);
+      if (immediatePrevious) {
+        disallowed.add(immediatePrevious);
+      }
+
+      const available = chunks.filter((chunk) => !disallowed.has(chunk));
+      if (available.length > 0) {
+        return available;
+      }
+
+      if (cooldownWindow.length <= 1) {
+        break;
+      }
+
+      cooldownWindow = cooldownWindow.slice(1);
+    }
+
+    return chunks.filter((chunk) => chunk !== immediatePrevious);
+  }
+
+  private computeTurnDurationSeconds(room: RoomState, turnNumber: number): number {
+    return Math.max(
+      MIN_TURN_SECONDS,
+      room.config.turnSeconds - Math.floor((turnNumber - 1) / 3),
+    );
+  }
+
+  private getTurnEndsAt(room: RoomState): number {
+    return (room.turnStartedAt ?? 0) + room.turnDurationSeconds * 1000;
+  }
+
+  private getChunkPool(room: RoomState): ChunkPool {
+    return this.dictionary.getChunkPool(room.config.allowFourLetterChunks);
+  }
+
+  private nextRandom(room: RoomState): number {
+    const next = nextSeededRandom(room.randomState);
+    room.randomState = next.state;
+    return next.value;
   }
 
   private getEligiblePlayers(room: RoomState): PlayerState[] {
@@ -817,8 +1006,8 @@ export class GameService {
 
   private serializeRoom(room: RoomState): PublicRoomState {
     const remainingMs =
-      room.phase === "in_game" && room.timerEndsAt
-        ? Math.max(0, room.timerEndsAt - Date.now())
+      room.phase === "in_game" && room.turnStartedAt !== null
+        ? Math.max(0, this.getTurnEndsAt(room) - Date.now())
         : 0;
 
     return {
@@ -839,11 +1028,16 @@ export class GameService {
         startingLives: room.config.startingLives,
         dictionaryEnabled: room.config.dictionaryEnabled,
         showTypingPreviews: room.config.showTypingPreviews,
+        allowFourLetterChunks: room.config.allowFourLetterChunks,
       },
       activePlayerId: room.activePlayerId,
       currentChunk: room.currentChunk,
+      currentChunkCoverage: room.currentChunkCoverage,
+      currentChunkTier: room.currentChunkTier,
+      turnNumber: room.turnNumber,
+      turnDurationSeconds: room.turnDurationSeconds,
       remainingMs,
-      usedWords: [...room.usedWordsOrdered],
+      usedWords: room.usedWordsOrdered.map((word) => word.toLowerCase()),
       winnerId: room.winnerId,
       lastEvent: room.lastEvent,
       canStart: room.phase === "lobby" && room.players.filter((player) => player.connected).length >= 2,

@@ -15,22 +15,40 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
 
 - `client/` React app (Home, Lobby, Game, Results)
 - `server/` Express + Socket.IO authoritative game server
+- `server/assets/` base words plus extra place-name dictionary additions
 
 ## Features
 
 - Room creation with 6-character code
 - Join by room code and display name
 - Host controls before start:
-  - Turn timer: 5-20 seconds
+  - Initial turn timer: 5-20 seconds
   - Starting lives: 1-5
   - Dictionary validation on/off
+  - Optional 4-letter chunk pool expansion
   - Live typing previews on/off
 - Server-authoritative gameplay:
   - Active player must submit an unused alphabetic word (>=3 letters)
   - Word must contain required chunk
-  - Optional dictionary validation from local `wordlist.txt`
-  - Correct word passes bomb to next eligible player and resets timer
+  - Optional dictionary validation from merged local assets + `word-list`
+  - Correct word passes bomb to next eligible player and re-rolls the chunk
   - Timer expiry removes life; elimination at 0 lives
+- Expanded dictionary pipeline:
+  - Merges `server/assets/wordlist.txt`, `server/assets/extra_words.txt`, and npm package `word-list`
+  - Normalizes words to letters only, length 3-20, and deduplicates
+  - `word-list` package by Sindre Sorhus, MIT license
+- Chunk pool generation and difficulty banding:
+  - Scans 2-3 letter substrings by default; host can optionally include 4-letter chunks
+  - Only chunks with dictionary coverage >= 1500 are eligible
+  - Prefers familiar vowel-containing chunks or common consonant clusters
+  - Caps the final pool into a familiar 400-1200 chunk range, targeting about 800 when enough eligible chunks exist
+  - Auto-bands tiers from coverage percentiles: 0-10, 10-30, 30-60, 60-85, and 85-100
+  - Keeps an 8-turn chunk cooldown, with no immediate repeats
+- Match tension and chunk metadata:
+  - Difficulty ramps from easy toward hard/very hard as turn count rises
+  - Independent 10% very-hard injection stays inside the eligible pool
+  - Turn duration decays by 1 second every 3 turns from the host's initial timer, never below 5 seconds
+  - UI shows chunk subscript metadata as `<Difficulty> | <Nk>`
 - Active-turn live typing feedback:
   - Only the active player's preview is shared with the room
   - Preview text persists for the full active turn once typing starts
@@ -187,5 +205,8 @@ If sockets fail in production, re-check:
 ## Notes
 
 - Game state is in-memory only. Restarting server clears rooms/matches.
-- Dictionary uses local `server/wordlist.txt` and never calls external paid APIs.
+- Dictionary never calls external APIs at runtime. It uses local assets plus the bundled `word-list` npm package.
+- Chunk selection uses an 8-turn cooldown queue. If a tier runs dry under cooldown, the oldest chunk in the cooldown window is relaxed first, but immediate repeats remain disallowed.
+- Difficulty tiers are computed from coverage percentiles on the final eligible chunk pool after filtering and any cap/downselection.
+- Turn time shown in the UI is the current turn's authoritative duration, not just the host's initial timer slider value.
 - Server broadcasts room/game state at 4Hz during active matches for consistent timer updates.

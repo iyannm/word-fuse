@@ -2,6 +2,7 @@ import { FormEvent, RefObject, useCallback, useEffect, useMemo, useRef, useState
 import { socket } from "./socket";
 import {
   AckResponse,
+  ChunkTier,
   PublicPlayerState,
   PublicRoomState,
   RoomConfig,
@@ -89,6 +90,18 @@ function createBlankTypingState(activePlayerId: string | null = null): TypingSta
     isTyping: false,
     text: "",
   };
+}
+
+const TIER_LABELS: Record<ChunkTier, string> = {
+  veryEasy: "Very Easy",
+  easy: "Easy",
+  medium: "Medium",
+  hard: "Hard",
+  veryHard: "Very Hard",
+};
+
+function formatCoverageK(value: number | null): string {
+  return `${Math.round((value ?? 0) / 1000)}k`;
 }
 
 const MIN_ERROR_DISPLAY_MS = 3000;
@@ -204,7 +217,7 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
           <h3>Settings</h3>
 
           <label>
-            Turn Timer: <strong>{props.roomState.config.turnSeconds}s</strong>
+            Initial Turn Timer: <strong>{props.roomState.config.turnSeconds}s</strong>
             <input
               type="range"
               min={5}
@@ -246,6 +259,18 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
           <label className="checkbox-row">
             <input
               type="checkbox"
+              checked={props.roomState.config.allowFourLetterChunks}
+              disabled={!props.isHost}
+              onChange={(event) =>
+                props.onUpdateSettings({ allowFourLetterChunks: event.target.checked })
+              }
+            />
+            Allow 4-letter chunks
+          </label>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
               checked={props.roomState.config.showTypingPreviews}
               disabled={!props.isHost}
               onChange={(event) =>
@@ -254,6 +279,11 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
             />
             Show live typing previews
           </label>
+
+          <p className="small-note">
+            Chunk pool defaults to familiar 2-3 letter groups. Turn time drops by 1s every 3 turns,
+            never below 5s.
+          </p>
 
           {props.isHost ? (
             <button type="button" onClick={props.onStart} disabled={!props.roomState.canStart}>
@@ -296,6 +326,10 @@ function GameView(props: GameViewProps): JSX.Element {
   );
   const secondsLeft = Math.max(0, Math.ceil(props.roomState.remainingMs / 1000));
   const liveAttemptPreview = props.typingState.text || "...";
+  const chunkTierLabel = props.roomState.currentChunkTier
+    ? TIER_LABELS[props.roomState.currentChunkTier]
+    : null;
+  const chunkCoverageLabel = formatCoverageK(props.roomState.currentChunkCoverage);
 
   return (
     <section className="view-card">
@@ -312,8 +346,22 @@ function GameView(props: GameViewProps): JSX.Element {
       ) : null}
 
       <div className={props.isYourTurn ? "bomb-area active-turn" : "bomb-area"}>
-        <div className="chunk">{props.roomState.currentChunk ?? "--"}</div>
+        <div className="chunk-stack">
+          <div className="chunk">{props.roomState.currentChunk ?? "--"}</div>
+          {chunkTierLabel ? (
+            <div className={`chunk-subscript ${props.roomState.currentChunkTier ?? ""}`}>
+              {chunkTierLabel} | {chunkCoverageLabel}
+            </div>
+          ) : null}
+        </div>
         <div className={secondsLeft <= 3 ? "timer danger" : "timer"}>{secondsLeft}s</div>
+        <div className="turn-pill-row">
+          <span className="turn-pill">Turn {props.roomState.turnNumber}</span>
+          <span className="turn-pill">{props.roomState.turnDurationSeconds}s turn</span>
+          <span className="turn-pill">
+            {props.roomState.config.allowFourLetterChunks ? "2-4 letters" : "2-3 letters"}
+          </span>
+        </div>
         <div className="active-player">Active: {activePlayer?.name ?? "Waiting"}</div>
       </div>
 

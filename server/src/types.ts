@@ -1,10 +1,17 @@
 export type GamePhase = "lobby" | "in_game" | "results";
+export type ChunkTier = "veryEasy" | "easy" | "medium" | "hard" | "veryHard";
 
 export interface RoomConfig {
   turnSeconds: number;
   startingLives: number;
   dictionaryEnabled: boolean;
   showTypingPreviews: boolean;
+  allowFourLetterChunks: boolean;
+}
+
+export interface TierBand {
+  min: number;
+  max: number;
 }
 
 export interface ActiveTurnTypingState {
@@ -35,8 +42,14 @@ export interface RoomState {
   usedWordsOrdered: string[];
   activePlayerId: string | null;
   currentChunk: string | null;
-  previousChunk: string | null;
-  timerEndsAt: number | null;
+  currentChunkCoverage: number | null;
+  currentChunkTier: ChunkTier | null;
+  turnNumber: number;
+  turnDurationSeconds: number;
+  turnStartedAt: number | null;
+  matchStartedAt: number | null;
+  recentChunks: string[];
+  randomState: number;
   winnerId: string | null;
   lastEvent: string;
   activeTurnTyping: ActiveTurnTypingState;
@@ -63,6 +76,10 @@ export interface PublicRoomState {
   config: RoomConfig;
   activePlayerId: string | null;
   currentChunk: string | null;
+  currentChunkCoverage: number | null;
+  currentChunkTier: ChunkTier | null;
+  turnNumber: number;
+  turnDurationSeconds: number;
   remainingMs: number;
   usedWords: string[];
   winnerId: string | null;
@@ -101,6 +118,7 @@ export interface UpdateSettingsPayload {
   startingLives?: number;
   dictionaryEnabled?: boolean;
   showTypingPreviews?: boolean;
+  allowFourLetterChunks?: boolean;
 }
 
 export interface PlayerActionPayload {

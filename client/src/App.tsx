@@ -890,6 +890,7 @@ function GameHudBar(props: GameHudBarProps): JSX.Element {
 interface TurnCountdownReadoutProps {
   remainingMs: number;
   turnNumber: number;
+  highlighted?: boolean;
 }
 
 function TurnCountdownReadout(props: TurnCountdownReadoutProps): JSX.Element {
@@ -904,7 +905,9 @@ function TurnCountdownReadout(props: TurnCountdownReadoutProps): JSX.Element {
         className={`arcade-mono inline-flex items-end gap-2 rounded-full border px-5 py-2.5 ${
           urgent
             ? "border-danger/45 bg-danger/15 text-danger motion-safe:animate-pulse"
-            : "border-neonCyan/35 bg-ocean/78 text-neonCyan"
+            : props.highlighted
+              ? "border-sunsetOrange/45 bg-sunsetOrange/12 text-sunsetOrange shadow-[0_0_24px_rgba(255,155,84,0.18)]"
+              : "border-neonCyan/35 bg-ocean/78 text-neonCyan"
         }`}
         aria-label={`${secondsLeft} seconds remaining`}
       >
@@ -1420,6 +1423,10 @@ function GameView(props: GameViewProps): JSX.Element {
     (player) => player.id === (props.typingState.activePlayerId ?? props.roomState.activePlayerId),
   );
   const localPlayerOut = isPlayerOut(props.localPlayer);
+  const isMyTurn =
+    props.session.playerId === props.roomState.activePlayerId &&
+    props.localPlayer?.role === "player" &&
+    !localPlayerOut;
   const chunkTierLabel = props.roomState.currentChunkTier
     ? TIER_LABELS[props.roomState.currentChunkTier]
     : null;
@@ -1509,7 +1516,7 @@ function GameView(props: GameViewProps): JSX.Element {
       <div
         ref={turnPanelRef}
         className={`panel-turn min-h-[30rem] px-4 py-5 sm:px-6 sm:py-6 lg:min-h-[34rem] ${
-          props.isYourTurn ? "panel-turn-active motion-safe:animate-panel-pulse" : ""
+          isMyTurn ? "panel-turn-active motion-safe:animate-pulse-orange motion-reduce:animate-none" : ""
         } ${panelFeedback === "pass" ? "panel-turn-pass motion-safe:animate-pass-burst" : ""} ${
           panelFeedback === "boom" ? "panel-turn-boom motion-safe:animate-boom-flash" : ""
         }`}
@@ -1525,14 +1532,14 @@ function GameView(props: GameViewProps): JSX.Element {
           <div className="flex w-full justify-center">
             <div
               className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.32em] ${
-                props.isYourTurn
-                  ? "border-neonCyan/40 bg-neonCyan/12 text-neonCyan"
+                isMyTurn
+                  ? "border-sunsetOrange/55 bg-sunsetOrange/14 text-sunsetOrange shadow-[0_0_22px_rgba(255,155,84,0.18)]"
                   : "border-white/15 bg-white/8 text-sand/78"
               }`}
               role="status"
               aria-live="polite"
             >
-              {props.isYourTurn ? (
+              {isMyTurn ? (
                 <>
                   <Sparkles className="size-4" aria-hidden="true" />
                   Your Turn
@@ -1547,6 +1554,7 @@ function GameView(props: GameViewProps): JSX.Element {
             <TurnCountdownReadout
               remainingMs={props.roomState.remainingMs}
               turnNumber={props.roomState.turnNumber}
+              highlighted={isMyTurn}
             />
 
             <div className="relative z-10 flex w-full max-w-[34rem] flex-col items-center gap-6">
@@ -1570,7 +1578,13 @@ function GameView(props: GameViewProps): JSX.Element {
           </div>
 
           <div className="w-full max-w-3xl">
-            <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">{typingLabel}</p>
+            <p
+              className={`text-xs uppercase tracking-[0.3em] ${
+                isMyTurn ? "text-sunsetOrange/80" : "text-neonCyan/80"
+              }`}
+            >
+              {typingLabel}
+            </p>
             <div
               className={`mt-4 font-display text-[clamp(2.5rem,7vw,5rem)] uppercase leading-[0.92] ${
                 props.typingState.isTyping ? "text-sand text-shadow-neon" : "text-sand/32"

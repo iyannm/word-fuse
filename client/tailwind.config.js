@@ -57,6 +57,20 @@ export default {
             filter: "saturate(1.08)",
           },
         },
+        "pulse-orange": {
+          "0%, 100%": {
+            boxShadow:
+              "0 0 0 1px rgba(255, 155, 84, 0.24), 0 0 32px rgba(255, 155, 84, 0.22), inset 0 0 28px rgba(255, 155, 84, 0.08)",
+            backgroundColor: "rgba(56, 28, 10, 0.34)",
+            filter: "saturate(1)",
+          },
+          "50%": {
+            boxShadow:
+              "0 0 0 1px rgba(255, 190, 120, 0.34), 0 0 48px rgba(255, 140, 0, 0.34), inset 0 0 36px rgba(255, 155, 84, 0.14)",
+            backgroundColor: "rgba(74, 34, 10, 0.42)",
+            filter: "saturate(1.06) brightness(1.02)",
+          },
+        },
         "pass-burst": {
           "0%": {
             transform: "translateY(0) scale(1)",
@@ -131,6 +145,7 @@ export default {
       animation: {
         "chip-pulse": "chip-pulse 1.3s ease-in-out infinite",
         "panel-pulse": "panel-pulse 1.6s ease-in-out infinite",
+        "pulse-orange": "pulse-orange 1.8s ease-in-out infinite",
         "pass-burst": "pass-burst 420ms ease-out",
         "boom-flash": "boom-flash 520ms ease-out",
         "word-flash": "word-flash 320ms ease-out",

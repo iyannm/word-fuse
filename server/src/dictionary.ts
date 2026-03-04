@@ -1,17 +1,23 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import wordListPath from "word-list";
+import { normalizeLettersOnly } from "./utils";
 import { ChunkTier, TierBand } from "./types";
 
 const MIN_WORD_LENGTH = 3;
 const MAX_WORD_LENGTH = 20;
 const MIN_CHUNK_COVERAGE = 1500;
-const MIN_CHUNK_POOL_SIZE = 400;
 const TARGET_CHUNK_POOL_SIZE = 800;
+const HARD_CHUNK_POOL_SIZE = 1200;
 const MIN_TIER_SIZE = 150;
 const CHUNK_LENGTHS = [2, 3, 4] as const;
 const DEFAULT_CHUNK_LENGTHS = [2, 3] as const;
 const EXTENDED_CHUNK_LENGTHS = [2, 3, 4] as const;
+const COVERAGE_BUCKET_COUNT = 5;
+const FOUR_LETTER_TARGET_SHARE = 0.15;
+const FOUR_LETTER_MIN_SHARE = 0.1;
+const FOUR_LETTER_MAX_SHARE = 0.2;
 const CHUNK_TIER_ORDER: ChunkTier[] = ["veryHard", "hard", "medium", "easy", "veryEasy"];
 const CHUNK_TIER_WEIGHTS = [0.1, 0.2, 0.3, 0.25, 0.15];
 const COMMON_CONSONANT_CLUSTERS = [
@@ -70,6 +76,8 @@ const FALLBACK_CHUNKS = [
   "OUS",
 ];
 
+type ChunkLength = (typeof CHUNK_LENGTHS)[number];
+
 export interface ChunkDescriptor {
   chunk: string;
   coverage: number;
@@ -97,7 +105,7 @@ export interface Dictionary {
 interface RawChunkStat {
   chunk: string;
   coverage: number;
-  length: number;
+  length: ChunkLength;
   preferred: boolean;
 }
 
@@ -106,26 +114,37 @@ interface TierPlan {
   warning: string | null;
 }
 
-function normalizeDictionaryWord(input: string): string {
-  return input
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .replace(/[^A-Za-z]/g, "")
-    .toUpperCase();
+interface DictionarySource {
+  label: string;
+  filePath: string;
+  required: boolean;
 }
 
-function parseWords(raw: string): Set<string> {
-  const words = raw
-    .split(/\r?\n/)
-    .map((line) => normalizeDictionaryWord(line.trim()))
-    .filter((line) => line.length >= MIN_WORD_LENGTH && line.length <= MAX_WORD_LENGTH);
+interface LoadedWordSource {
+  label: string;
+  filePath: string;
+  words: Set<string>;
+  blockedCount: number;
+}
 
-  return new Set(words);
+function resolveAssetPath(fileName: string): string {
+  return path.join(__dirname, "..", "assets", fileName);
+}
+
+function normalizeDictionaryWord(input: string): string {
+  return normalizeLettersOnly(input.trim()).toUpperCase();
+}
+
+function isAllowedDictionaryWord(word: string): boolean {
+  return word.length >= MIN_WORD_LENGTH && word.length <= MAX_WORD_LENGTH;
+}
+
+function hashDictionaryWord(word: string): string {
+  return createHash("sha256").update(word).digest("hex");
 }
 
 function resolveBaseWordListPath(): string {
-  const preferredPath = path.join(__dirname, "..", "assets", "wordlist.txt");
+  const preferredPath = resolveAssetPath("wordlist.txt");
   if (fs.existsSync(preferredPath)) {
     return preferredPath;
   }
@@ -133,9 +152,98 @@ function resolveBaseWordListPath(): string {
   return path.join(__dirname, "..", "wordlist.txt");
 }
 
-function readWordFile(filePath: string): Set<string> {
-  const raw = fs.readFileSync(filePath, "utf8");
-  return parseWords(raw);
+function readBlockedWords(filePath: string): Set<string> {
+  if (!fs.existsSync(filePath)) {
+    return new Set<string>();
+  }
+
+  return new Set(
+    fs
+      .readFileSync(filePath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim().toLowerCase())
+      .filter((line) => /^[a-f0-9]{64}$/.test(line)),
+  );
+}
+
+function readWordSource(
+  definition: DictionarySource,
+  blockedWords: ReadonlySet<string>,
+): LoadedWordSource {
+  if (!fs.existsSync(definition.filePath)) {
+    if (definition.required) {
+      throw new Error(`Missing required dictionary source: ${definition.filePath}`);
+    }
+
+    return {
+      label: definition.label,
+      filePath: definition.filePath,
+      words: new Set<string>(),
+      blockedCount: 0,
+    };
+  }
+
+  const words = new Set<string>();
+  let blockedCount = 0;
+
+  for (const line of fs.readFileSync(definition.filePath, "utf8").split(/\r?\n/)) {
+    const normalized = normalizeDictionaryWord(line);
+    if (!isAllowedDictionaryWord(normalized)) {
+      continue;
+    }
+
+    if (blockedWords.has(hashDictionaryWord(normalized))) {
+      blockedCount += 1;
+      continue;
+    }
+
+    words.add(normalized);
+  }
+
+  return {
+    label: definition.label,
+    filePath: definition.filePath,
+    words,
+    blockedCount,
+  };
+}
+
+function mergeWordSources(sources: LoadedWordSource[]): {
+  dictSet: Set<string>;
+  wordsArray: string[];
+  reports: Array<{
+    label: string;
+    filePath: string;
+    filteredCount: number;
+    uniqueAddedCount: number;
+    blockedCount: number;
+  }>;
+} {
+  const dictSet = new Set<string>();
+  const reports = sources.map((source) => {
+    let uniqueAddedCount = 0;
+
+    for (const word of source.words) {
+      if (!dictSet.has(word)) {
+        dictSet.add(word);
+        uniqueAddedCount += 1;
+      }
+    }
+
+    return {
+      label: source.label,
+      filePath: source.filePath,
+      filteredCount: source.words.size,
+      uniqueAddedCount,
+      blockedCount: source.blockedCount,
+    };
+  });
+
+  return {
+    dictSet,
+    wordsArray: [...dictSet],
+    reports,
+  };
 }
 
 function isPreferredChunk(chunk: string): boolean {
@@ -144,7 +252,11 @@ function isPreferredChunk(chunk: string): boolean {
   }
 
   return COMMON_CONSONANT_CLUSTERS.some(
-    (cluster) => cluster === chunk || cluster.startsWith(chunk) || chunk.startsWith(cluster),
+    (cluster) =>
+      cluster === chunk ||
+      cluster.startsWith(chunk) ||
+      chunk.startsWith(cluster) ||
+      chunk.endsWith(cluster),
   );
 }
 
@@ -168,7 +280,13 @@ function scanChunkCoverage(wordsArray: string[]): RawChunkStat[] {
       const seen = new Set<string>();
 
       for (let index = 0; index <= word.length - length; index += 1) {
-        seen.add(word.slice(index, index + length));
+        const chunk = word.slice(index, index + length);
+
+        if (length === 4 && !isPreferredChunk(chunk)) {
+          continue;
+        }
+
+        seen.add(chunk);
       }
 
       for (const chunk of seen) {
@@ -182,7 +300,7 @@ function scanChunkCoverage(wordsArray: string[]): RawChunkStat[] {
     .map(([chunk, coverage]) => ({
       chunk,
       coverage,
-      length: chunk.length,
+      length: chunk.length as ChunkLength,
       preferred: isPreferredChunk(chunk),
     }))
     .sort(compareChunkStats);
@@ -208,13 +326,21 @@ function interleaveStats(preferred: RawChunkStat[], other: RawChunkStat[]): RawC
   return merged;
 }
 
-function capChunkPool(stats: RawChunkStat[]): RawChunkStat[] {
-  if (stats.length <= TARGET_CHUNK_POOL_SIZE) {
-    return [...stats];
+function createEmptyLengthCounts(): Record<ChunkLength, number> {
+  return {
+    2: 0,
+    3: 0,
+    4: 0,
+  };
+}
+
+function buildCoverageQueues(stats: RawChunkStat[]): RawChunkStat[][] {
+  if (stats.length === 0) {
+    return [];
   }
 
   const sorted = [...stats].sort(compareChunkStats);
-  const bucketCount = 5;
+  const bucketCount = Math.min(COVERAGE_BUCKET_COUNT, sorted.length);
   const buckets = Array.from({ length: bucketCount }, () => [] as RawChunkStat[]);
 
   for (let index = 0; index < sorted.length; index += 1) {
@@ -225,17 +351,33 @@ function capChunkPool(stats: RawChunkStat[]): RawChunkStat[] {
     buckets[bucketIndex].push(sorted[index]);
   }
 
-  const queues = buckets.map((bucket) =>
+  return buckets.map((bucket) =>
     interleaveStats(
       bucket.filter((stat) => stat.preferred),
       bucket.filter((stat) => !stat.preferred),
     ),
   );
+}
 
+function selectStatsWithSpread(
+  stats: RawChunkStat[],
+  targetCount: number,
+  existingChunks: ReadonlySet<string>,
+): RawChunkStat[] {
+  if (targetCount <= 0) {
+    return [];
+  }
+
+  const filteredStats = stats.filter((stat) => !existingChunks.has(stat.chunk));
+  if (filteredStats.length <= targetCount) {
+    return [...filteredStats].sort(compareChunkStats);
+  }
+
+  const queues = buildCoverageQueues(filteredStats);
   const selected: RawChunkStat[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(existingChunks);
 
-  while (selected.length < TARGET_CHUNK_POOL_SIZE) {
+  while (selected.length < targetCount) {
     let addedInRound = false;
 
     for (const queue of queues) {
@@ -251,7 +393,7 @@ function capChunkPool(stats: RawChunkStat[]): RawChunkStat[] {
         break;
       }
 
-      if (selected.length >= TARGET_CHUNK_POOL_SIZE) {
+      if (selected.length >= targetCount) {
         break;
       }
     }
@@ -262,6 +404,197 @@ function capChunkPool(stats: RawChunkStat[]): RawChunkStat[] {
   }
 
   return selected.sort(compareChunkStats);
+}
+
+function appendSelected(
+  selected: RawChunkStat[],
+  seenChunks: Set<string>,
+  additions: RawChunkStat[],
+): void {
+  for (const stat of additions) {
+    if (seenChunks.has(stat.chunk)) {
+      continue;
+    }
+
+    seenChunks.add(stat.chunk);
+    selected.push(stat);
+  }
+}
+
+function pickPreferredSingleLength(availableCounts: Record<ChunkLength, number>): ChunkLength {
+  const priority: ChunkLength[] = [3, 2, 4];
+
+  return (
+    priority.find((length) => availableCounts[length] > 0) ??
+    CHUNK_LENGTHS.find((length) => availableCounts[length] > 0) ??
+    3
+  );
+}
+
+function allocateBaseLengthTargets(
+  total: number,
+  availableCounts: Record<ChunkLength, number>,
+): Record<ChunkLength, number> {
+  const targets = createEmptyLengthCounts();
+
+  if (total <= 0) {
+    return targets;
+  }
+
+  const availableTwo = availableCounts[2];
+  const availableThree = availableCounts[3];
+
+  if (total === 1) {
+    targets[pickPreferredSingleLength(availableCounts)] = 1;
+    return targets;
+  }
+
+  if (availableTwo === 0) {
+    targets[3] = Math.min(total, availableThree);
+    return targets;
+  }
+
+  if (availableThree === 0) {
+    targets[2] = Math.min(total, availableTwo);
+    return targets;
+  }
+
+  let targetThree = Math.round((total * availableThree) / Math.max(1, availableTwo + availableThree));
+  targetThree = Math.max(1, Math.min(targetThree, Math.min(availableThree, total - 1)));
+
+  let targetTwo = total - targetThree;
+  targetTwo = Math.max(1, targetTwo);
+
+  if (targetTwo > availableTwo) {
+    const overflow = targetTwo - availableTwo;
+    targetTwo = availableTwo;
+    targetThree = Math.min(availableThree, targetThree + overflow);
+  }
+
+  if (targetThree > availableThree) {
+    const overflow = targetThree - availableThree;
+    targetThree = availableThree;
+    targetTwo = Math.min(availableTwo, targetTwo + overflow);
+  }
+
+  targets[2] = targetTwo;
+  targets[3] = targetThree;
+  return targets;
+}
+
+function getMaxFourLetterTarget(total: number, availableFour: number): number {
+  return Math.min(availableFour, Math.ceil(total * FOUR_LETTER_MAX_SHARE));
+}
+
+function allocateExtendedLengthTargets(
+  total: number,
+  availableCounts: Record<ChunkLength, number>,
+): Record<ChunkLength, number> {
+  const targets = createEmptyLengthCounts();
+
+  if (total <= 0) {
+    return targets;
+  }
+
+  const availableFour = availableCounts[4];
+  if (availableFour > 0) {
+    const minFour = Math.min(availableFour, Math.floor(total * FOUR_LETTER_MIN_SHARE));
+    const maxFour = getMaxFourLetterTarget(total, availableFour);
+    const preferredFour = Math.min(availableFour, Math.round(total * FOUR_LETTER_TARGET_SHARE));
+
+    if (maxFour > 0) {
+      targets[4] = Math.min(maxFour, Math.max(minFour, preferredFour));
+    }
+  }
+
+  const baseTargets = allocateBaseLengthTargets(total - targets[4], availableCounts);
+  targets[2] = baseTargets[2];
+  targets[3] = baseTargets[3];
+
+  let assigned = targets[2] + targets[3] + targets[4];
+  if (assigned >= total) {
+    return targets;
+  }
+
+  const addThree = Math.min(total - assigned, Math.max(0, availableCounts[3] - targets[3]));
+  targets[3] += addThree;
+  assigned += addThree;
+
+  const addTwo = Math.min(total - assigned, Math.max(0, availableCounts[2] - targets[2]));
+  targets[2] += addTwo;
+  assigned += addTwo;
+
+  const maxFour = getMaxFourLetterTarget(total, availableFour);
+  const addFour = Math.min(total - assigned, Math.max(0, maxFour - targets[4]));
+  targets[4] += addFour;
+
+  return targets;
+}
+
+function buildChunkPoolStats(
+  allEligibleChunks: RawChunkStat[],
+  allowedLengths: readonly number[],
+): RawChunkStat[] {
+  const lengthFiltered = allEligibleChunks.filter((stat) => allowedLengths.includes(stat.length));
+  if (lengthFiltered.length === 0) {
+    return [];
+  }
+
+  const poolTarget = Math.min(lengthFiltered.length, TARGET_CHUNK_POOL_SIZE, HARD_CHUNK_POOL_SIZE);
+  const statsByLength: Record<ChunkLength, RawChunkStat[]> = {
+    2: [],
+    3: [],
+    4: [],
+  };
+
+  for (const stat of lengthFiltered) {
+    statsByLength[stat.length].push(stat);
+  }
+
+  const availableCounts: Record<ChunkLength, number> = {
+    2: statsByLength[2].length,
+    3: statsByLength[3].length,
+    4: statsByLength[4].length,
+  };
+  const targets = allowedLengths.includes(4)
+    ? allocateExtendedLengthTargets(poolTarget, availableCounts)
+    : allocateBaseLengthTargets(poolTarget, availableCounts);
+
+  const selected: RawChunkStat[] = [];
+  const seenChunks = new Set<string>();
+
+  for (const length of allowedLengths) {
+    appendSelected(selected, seenChunks, selectStatsWithSpread(statsByLength[length as ChunkLength], targets[length as ChunkLength], seenChunks));
+  }
+
+  const nonFourLeftovers = lengthFiltered.filter(
+    (stat) => stat.length !== 4 && !seenChunks.has(stat.chunk),
+  );
+  appendSelected(
+    selected,
+    seenChunks,
+    selectStatsWithSpread(nonFourLeftovers, poolTarget - selected.length, seenChunks),
+  );
+
+  if (allowedLengths.includes(4)) {
+    const maxFourLetterTarget = getMaxFourLetterTarget(poolTarget, availableCounts[4]);
+    const currentFourLetterCount = selected.filter((stat) => stat.length === 4).length;
+    const fourLetterCapacity = Math.max(0, maxFourLetterTarget - currentFourLetterCount);
+
+    if (fourLetterCapacity > 0 && selected.length < poolTarget) {
+      appendSelected(
+        selected,
+        seenChunks,
+        selectStatsWithSpread(
+          statsByLength[4].filter((stat) => !seenChunks.has(stat.chunk)),
+          Math.min(poolTarget - selected.length, fourLetterCapacity),
+          seenChunks,
+        ),
+      );
+    }
+  }
+
+  return selected.sort(compareChunkStats).slice(0, HARD_CHUNK_POOL_SIZE);
 }
 
 function allocateCounts(total: number, weights: number[]): number[] {
@@ -313,39 +646,6 @@ function ensureNonEmptyCounts(counts: number[], total: number): number[] {
   return adjusted;
 }
 
-function tryRelaxTierCounts(counts: number[]): number[] {
-  const adjusted = [...counts];
-  let mutated = true;
-
-  while (mutated) {
-    mutated = false;
-
-    for (let index = 0; index < adjusted.length; index += 1) {
-      if (adjusted[index] >= MIN_TIER_SIZE) {
-        continue;
-      }
-
-      const leftSurplus = index > 0 ? adjusted[index - 1] - MIN_TIER_SIZE : -1;
-      const rightSurplus = index < adjusted.length - 1 ? adjusted[index + 1] - MIN_TIER_SIZE : -1;
-
-      if (leftSurplus <= 0 && rightSurplus <= 0) {
-        continue;
-      }
-
-      if (rightSurplus > leftSurplus) {
-        adjusted[index + 1] -= 1;
-      } else {
-        adjusted[index - 1] -= 1;
-      }
-
-      adjusted[index] += 1;
-      mutated = true;
-    }
-  }
-
-  return adjusted;
-}
-
 function createEmptyTierBands(): Record<ChunkTier, TierBand> {
   return {
     veryHard: { min: 0, max: 0 },
@@ -367,18 +667,20 @@ function createEmptyTierChunks(): Record<ChunkTier, string[]> {
 }
 
 function planTierCounts(total: number): TierPlan {
-  const baseCounts = ensureNonEmptyCounts(allocateCounts(total, CHUNK_TIER_WEIGHTS), total);
-
   if (total < MIN_TIER_SIZE * CHUNK_TIER_ORDER.length) {
     return {
-      counts: baseCounts,
+      counts: ensureNonEmptyCounts(allocateCounts(total, CHUNK_TIER_WEIGHTS), total),
       warning:
         `Chunk pool has ${total} chunks; minimum tier size ${MIN_TIER_SIZE} cannot be met ` +
         `across ${CHUNK_TIER_ORDER.length} tiers.`,
     };
   }
 
-  const relaxedCounts = tryRelaxTierCounts(baseCounts);
+  const minimumCounts = Array(CHUNK_TIER_ORDER.length).fill(MIN_TIER_SIZE);
+  const remaining = total - MIN_TIER_SIZE * CHUNK_TIER_ORDER.length;
+  const relaxedCounts = minimumCounts.map(
+    (count, index) => count + (allocateCounts(remaining, CHUNK_TIER_WEIGHTS)[index] ?? 0),
+  );
   const hasSmallTier = relaxedCounts.some((count) => count < MIN_TIER_SIZE);
 
   return {
@@ -394,11 +696,7 @@ function buildChunkPool(
   allowedLengths: readonly number[],
   label: string,
 ): ChunkPool {
-  const lengthFiltered = allEligibleChunks.filter((stat) => allowedLengths.includes(stat.length));
-  const preferredFiltered = lengthFiltered.filter((stat) => stat.preferred);
-  const preferredPool =
-    preferredFiltered.length >= TARGET_CHUNK_POOL_SIZE ? preferredFiltered : lengthFiltered;
-  const finalStats = capChunkPool(preferredPool).sort(compareChunkStats);
+  const finalStats = buildChunkPoolStats(allEligibleChunks, allowedLengths);
   const tierPlan = planTierCounts(finalStats.length);
   const tierBands = createEmptyTierBands();
   const tierChunks = createEmptyTierChunks();
@@ -469,9 +767,49 @@ function buildChunkPool(
   };
 }
 
+function logDictionarySourceReport(
+  reports: Array<{
+    label: string;
+    filePath: string;
+    filteredCount: number;
+    uniqueAddedCount: number;
+    blockedCount: number;
+  }>,
+  totalWords: number,
+  blockedWordsCount: number,
+): void {
+  console.log(`[Dictionary] Total dictionary words after normalization: ${totalWords}.`);
+
+  for (const report of reports) {
+    console.log(
+      `[Dictionary] ${report.label}: ${report.filteredCount} words after filtering, ` +
+        `${report.uniqueAddedCount} added to merged dictionary` +
+        `${report.blockedCount > 0 ? `, ${report.blockedCount} blocked` : ""}.`,
+    );
+  }
+
+  console.log(`[Dictionary] Blocklist size: ${blockedWordsCount}.`);
+
+  const attachedWordsReport = reports.find((report) => report.label === "repo words.txt");
+  if (attachedWordsReport) {
+    console.log(
+      `[Dictionary] words.txt loaded successfully from ${attachedWordsReport.filePath}.`,
+    );
+  }
+}
+
 function logChunkPoolReport(pool: ChunkPool, totalWords: number): void {
+  const countsByLength = createEmptyLengthCounts();
+
+  for (const descriptor of pool.chunkMap.values()) {
+    countsByLength[descriptor.length as ChunkLength] += 1;
+  }
+
   console.log(
-    `[Dictionary] ${pool.label}: ${totalWords} words, ${pool.poolSize} chunks, coverage floor ${MIN_CHUNK_COVERAGE}.`,
+    `[Dictionary] ${pool.label}: ${totalWords} words, ${pool.poolSize} chunks ` +
+      `(target ${TARGET_CHUNK_POOL_SIZE}, hard cap ${HARD_CHUNK_POOL_SIZE}), ` +
+      `lengths 2=${countsByLength[2]} 3=${countsByLength[3]} 4=${countsByLength[4]}, ` +
+      `coverage floor ${MIN_CHUNK_COVERAGE}.`,
   );
   console.log(
     `[Dictionary] ${pool.label} bands: ${CHUNK_TIER_ORDER.map((tier) => {
@@ -546,24 +884,67 @@ export function createDictionary(dictionaryEnabledEnv: string | undefined): Dict
   const requested = dictionaryEnabledEnv !== "false";
 
   if (!requested) {
-    console.warn("[Dictionary] Disabled via DICTIONARY_ENABLED=false. Falling back to non-dictionary validation.");
+    console.warn(
+      "[Dictionary] Disabled via DICTIONARY_ENABLED=false. Falling back to non-dictionary validation.",
+    );
     return createDisabledDictionary();
   }
 
   try {
-    const baseWords = readWordFile(resolveBaseWordListPath());
-    const extraWords = readWordFile(path.join(__dirname, "..", "assets", "extra_words.txt"));
-    const packageWords = readWordFile(wordListPath);
-    const dictSet = new Set<string>([...packageWords, ...baseWords, ...extraWords]);
-    const wordsArray = [...dictSet];
+    const blockedWords = readBlockedWords(resolveAssetPath("blocked_words.txt"));
+    const sources = [
+      readWordSource(
+        {
+          label: "package word-list",
+          filePath: wordListPath,
+          required: true,
+        },
+        blockedWords,
+      ),
+      readWordSource(
+        {
+          label: "base word list",
+          filePath: resolveBaseWordListPath(),
+          required: true,
+        },
+        blockedWords,
+      ),
+      readWordSource(
+        {
+          label: "extra words",
+          filePath: resolveAssetPath("extra_words.txt"),
+          required: false,
+        },
+        blockedWords,
+      ),
+      readWordSource(
+        {
+          label: "repo words.txt",
+          filePath: resolveAssetPath("words.txt"),
+          required: true,
+        },
+        blockedWords,
+      ),
+    ];
+    const { dictSet, wordsArray, reports } = mergeWordSources(sources);
 
     if (wordsArray.length === 0) {
       throw new Error("Merged dictionary produced no words.");
     }
 
+    logDictionarySourceReport(reports, dictSet.size, blockedWords.size);
+
     const allEligibleChunks = scanChunkCoverage(wordsArray);
-    const defaultPool = buildChunkPool(allEligibleChunks, DEFAULT_CHUNK_LENGTHS, "2-3 letter chunk pool");
-    const extendedPool = buildChunkPool(allEligibleChunks, EXTENDED_CHUNK_LENGTHS, "2-4 letter chunk pool");
+    const defaultPool = buildChunkPool(
+      allEligibleChunks,
+      DEFAULT_CHUNK_LENGTHS,
+      "2-3 letter chunk pool",
+    );
+    const extendedPool = buildChunkPool(
+      allEligibleChunks,
+      EXTENDED_CHUNK_LENGTHS,
+      "2-4 letter chunk pool",
+    );
 
     logChunkPoolReport(defaultPool, wordsArray.length);
     logChunkPoolReport(extendedPool, wordsArray.length);
@@ -579,7 +960,10 @@ export function createDictionary(dictionaryEnabledEnv: string | undefined): Dict
         null,
     };
   } catch (error) {
-    console.warn("[Dictionary] Falling back to non-dictionary validation because loading failed.", error);
+    console.warn(
+      "[Dictionary] Falling back to non-dictionary validation because loading failed.",
+      error,
+    );
     return createDisabledDictionary();
   }
 }

@@ -1,5 +1,13 @@
 const ROOM_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+export function normalizeLettersOnly(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^A-Za-z]/g, "");
+}
+
 export function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -21,22 +29,11 @@ export function sanitizePlayerName(input: string): string {
 }
 
 export function sanitizeWord(input: string): string {
-  return input
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .replace(/[^A-Za-z]/g, "")
-    .toLowerCase();
+  return normalizeLettersOnly(input.trim()).toLowerCase();
 }
 
 export function sanitizeTypingPreview(input: string): string {
-  return input
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .replace(/[^A-Za-z]/g, "")
-    .toUpperCase()
-    .slice(0, 24);
+  return normalizeLettersOnly(input).toUpperCase().slice(0, 24);
 }
 
 export function createRoomCode(existingCodes: Set<string>): string {

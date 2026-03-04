@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { FormEvent, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import BorderTimer from "./BorderTimer";
 import { socket } from "./socket";
 import {
   AckResponse,
@@ -33,6 +34,7 @@ import {
   Session,
   TypingState,
 } from "./types";
+import { useTurnCountdown } from "./useTurnCountdown";
 
 const SESSION_KEY = "word-fuse-session";
 const MIN_ERROR_DISPLAY_MS = 3000;
@@ -801,12 +803,6 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
   );
 }
 
-interface TimerRingProps {
-  remainingMs: number;
-  turnDurationSeconds: number;
-  turnNumber: number;
-}
-
 interface GameHudBarProps {
   roomCode: string;
   activeTurnLabel: string;
@@ -891,82 +887,33 @@ function GameHudBar(props: GameHudBarProps): JSX.Element {
   );
 }
 
-function TimerRing(props: TimerRingProps): JSX.Element {
-  const [remainingMs, setRemainingMs] = useState(() => Math.max(0, props.remainingMs));
+interface TurnCountdownReadoutProps {
+  remainingMs: number;
+  turnNumber: number;
+}
 
-  useEffect(() => {
-    const endAt = Date.now() + props.remainingMs;
-
-    const updateRemaining = (): void => {
-      setRemainingMs(Math.max(0, endAt - Date.now()));
-    };
-
-    updateRemaining();
-    const intervalId = window.setInterval(updateRemaining, 100);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [props.remainingMs, props.turnNumber]);
-
-  const radius = 124;
-  const circumference = 2 * Math.PI * radius;
-  const turnDurationMs = Math.max(1, props.turnDurationSeconds * 1000);
-  const progress = Math.max(0, Math.min(1, remainingMs / turnDurationMs));
-  const dashOffset = circumference * (1 - progress);
-  const secondsLeft = Math.max(0, Math.ceil(remainingMs / 1000));
+function TurnCountdownReadout(props: TurnCountdownReadoutProps): JSX.Element {
+  const liveRemainingMs = useTurnCountdown(props.remainingMs, props.turnNumber);
+  const secondsLeft = Math.max(0, Math.ceil(liveRemainingMs / 1000));
+  const urgent = secondsLeft <= 3;
 
   return (
-    <>
-      <div className="pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-[8.9rem] sm:-translate-y-[10rem]">
-        <div
-          className={`arcade-mono rounded-full border px-4 py-2 text-sm font-semibold ${
-            secondsLeft <= 3
-              ? "border-danger/45 bg-danger/15 text-danger"
-              : "border-neonCyan/35 bg-ocean/70 text-neonCyan"
-          }`}
-        >
-          {secondsLeft}s
-        </div>
+    <div className="flex flex-col items-center gap-2">
+      <p className="text-[10px] uppercase tracking-[0.34em] text-sand/48">Time Left</p>
+      <div
+        className={`arcade-mono inline-flex items-end gap-2 rounded-full border px-5 py-2.5 ${
+          urgent
+            ? "border-danger/45 bg-danger/15 text-danger motion-safe:animate-pulse"
+            : "border-neonCyan/35 bg-ocean/78 text-neonCyan"
+        }`}
+        aria-label={`${secondsLeft} seconds remaining`}
+      >
+        <span className="text-2xl font-semibold leading-none sm:text-3xl">{secondsLeft}</span>
+        <span className="pb-0.5 text-[10px] font-semibold uppercase tracking-[0.34em] text-current/70">
+          sec
+        </span>
       </div>
-
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <svg
-          className="h-[18rem] w-[18rem] sm:h-[21rem] sm:w-[21rem] lg:h-[22rem] lg:w-[22rem]"
-          viewBox="0 0 320 320"
-          fill="none"
-          aria-hidden="true"
-        >
-          <defs>
-            <linearGradient id="timer-ring-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#4AF8FF" />
-              <stop offset="55%" stopColor="#8F5BFF" />
-              <stop offset="100%" stopColor="#FF9B54" />
-            </linearGradient>
-          </defs>
-          <circle cx="160" cy="160" r={radius} stroke="rgba(255,255,255,0.08)" strokeWidth="12" />
-          <circle
-            cx="160"
-            cy="160"
-            r={radius}
-            stroke="url(#timer-ring-gradient)"
-            strokeWidth="12"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={dashOffset}
-            transform="rotate(-90 160 160)"
-          />
-          <circle
-            cx="160"
-            cy="160"
-            r="94"
-            fill="rgba(7,11,26,0.34)"
-            stroke="rgba(74,248,255,0.08)"
-            strokeWidth="1"
-          />
-        </svg>
-      </div>
-    </>
+    </div>
   );
 }
 
@@ -1233,6 +1180,221 @@ function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
   );
 }
 
+interface GameDetailsDrawerProps {
+  session: Session;
+  roomState: PublicRoomState;
+  isHost: boolean;
+  chunkLengthLabel: string;
+  targetDifficultyLabel: string | null;
+  onToggleTypingPreviews: (enabled: boolean) => void;
+}
+
+function GameDetailsScoreRow(props: {
+  player: PublicPlayerState;
+  roomState: PublicRoomState;
+  session: Session;
+}): JSX.Element {
+  const spectator = props.player.role === "spectator";
+  const eliminated = isPlayerOut(props.player);
+  const isLocalPlayer = props.player.id === props.session.playerId;
+  const isActive = props.player.id === props.roomState.activePlayerId;
+
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-2xl border px-3 py-3 ${
+        eliminated
+          ? "border-white/10 bg-white/5 opacity-60"
+          : isActive
+            ? "border-neonCyan/30 bg-neonCyan/8"
+            : "border-white/10 bg-white/6"
+      }`}
+    >
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-full border border-neonCyan/25 bg-neonCyan/10 text-[10px] font-semibold uppercase tracking-[0.16em] text-neonCyan">
+        {playerInitials(props.player.name)}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`truncate text-sm font-semibold text-sand ${
+              eliminated ? "line-through decoration-danger/70" : ""
+            }`}
+          >
+            {props.player.name}
+          </span>
+          {isLocalPlayer ? <RoleTag label="You" tone="cyan" /> : null}
+          {!props.player.connected ? <RoleTag label="Offline" tone="danger" /> : null}
+          {spectator ? <RoleTag label="Spec" /> : null}
+          {isActive && !spectator && !eliminated ? <RoleTag label="Active" tone="orange" /> : null}
+        </div>
+
+        <div className="mt-2">
+          <span
+            className={`inline-flex max-w-full items-center rounded-full border px-3 py-1 text-xs ${
+              spectator ? "border-white/10 bg-black/15 text-sand/45" : "border-white/10 bg-black/15 text-sand/82"
+            }`}
+          >
+            <span className="truncate">{spectator ? "Watching only" : props.player.lastWord || "Waiting..."}</span>
+          </span>
+        </div>
+      </div>
+
+      <div className="shrink-0">
+        {spectator ? (
+          <LivesIndicator lives={0} spectator />
+        ) : eliminated ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-danger/25 bg-danger/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-danger">
+            <Skull className="size-3.5" aria-hidden="true" />
+            Out
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-sunsetOrange/35 bg-sunsetOrange/10 px-2.5 py-1 text-xs font-semibold text-sand/84">
+            <Heart
+              className="size-3.5 text-sunsetOrange"
+              fill="rgba(255,155,84,0.12)"
+              aria-hidden="true"
+            />
+            {props.player.lives}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GameDetailsDrawer(props: GameDetailsDrawerProps): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const activePlayers = props.roomState.players.filter((player) => player.role === "player").length;
+  const toggleTypingPreviews = (): void => {
+    props.onToggleTypingPreviews(!props.roomState.config.showTypingPreviews);
+  };
+
+  return (
+    <div className="card px-3 py-3 sm:px-4">
+      <button
+        className="flex w-full items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-left transition hover:border-neonCyan/30 hover:bg-white/8 motion-reduce:transition-none"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-controls="game-details-drawer"
+      >
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">Details</p>
+          <p className="mt-1 text-sm text-sand/58">Scoreboard and room pulse stay tucked away until needed.</p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="badge border-white/10 bg-white/6 text-sand/70">
+            <Users className="size-3.5" aria-hidden="true" />
+            {activePlayers}
+          </span>
+          <span className="inline-flex size-9 items-center justify-center rounded-full border border-white/10 bg-white/6 text-sand/72">
+            {open ? <ChevronUp className="size-4" aria-hidden="true" /> : <ChevronDown className="size-4" aria-hidden="true" />}
+          </span>
+        </div>
+      </button>
+
+      <div
+        id="game-details-drawer"
+        className={`grid overflow-hidden transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none ${
+          open ? "mt-4 grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-80"
+        }`}
+      >
+        <div className="min-h-0">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+            <section className="rounded-3xl border border-white/10 bg-black/15 p-4 sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-sunsetOrange/80">Scoreboard</p>
+                  <h3 className="mt-1 text-lg font-semibold text-sand">Survival Board</h3>
+                </div>
+                <span className="badge border-white/10 bg-white/6 text-sand/70">
+                  {props.roomState.players.length} seats
+                </span>
+              </div>
+
+              <div className="mt-4 space-y-2.5">
+                {orderedScoreboardPlayers(props.roomState.players).map((player) => (
+                  <GameDetailsScoreRow
+                    key={player.id}
+                    player={player}
+                    roomState={props.roomState}
+                    session={props.session}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-3xl border border-white/10 bg-black/15 p-4 sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-neonPurple/80">Room Pulse</p>
+                  <h3 className="mt-1 text-lg font-semibold text-sand">Room Info</h3>
+                </div>
+                <RoleTag label={`Turn ${props.roomState.turnNumber}`} tone="cyan" />
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                    <Copy className="size-4 text-neonCyan" aria-hidden="true" />
+                    Room Code
+                  </div>
+                  <p className="arcade-mono mt-2 text-base tracking-[0.28em] text-sand">{props.roomState.roomCode}</p>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                    <TimerReset className="size-4 text-neonCyan" aria-hidden="true" />
+                    Timer Base
+                  </div>
+                  <p className="mt-2 text-sm text-sand/58">{props.roomState.turnDurationSeconds}s per turn</p>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                    <Zap className="size-4 text-sunsetOrange" aria-hidden="true" />
+                    Chunk Pool
+                  </div>
+                  <p className="mt-2 text-sm text-sand/58">
+                    {props.chunkLengthLabel}
+                    {props.targetDifficultyLabel ? ` | target ${props.targetDifficultyLabel}` : ""}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-sand">
+                    {props.roomState.config.showTypingPreviews ? (
+                      <Eye className="size-4 text-success" aria-hidden="true" />
+                    ) : (
+                      <EyeOff className="size-4 text-sunsetOrange" aria-hidden="true" />
+                    )}
+                    Typing Preview
+                  </div>
+                  <p className="mt-2 text-sm text-sand/58">
+                    {props.roomState.config.showTypingPreviews ? "Visible to everyone." : "Hidden behind typing..."}
+                  </p>
+                </div>
+              </div>
+
+              {props.isHost ? (
+                <button className="btn-ghost mt-4 w-full px-3 py-2 text-xs" type="button" onClick={toggleTypingPreviews}>
+                  {props.roomState.config.showTypingPreviews ? (
+                    <EyeOff className="size-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="size-4" aria-hidden="true" />
+                  )}
+                  {props.roomState.config.showTypingPreviews ? "Hide Typing Preview" : "Show Typing Preview"}
+                </button>
+              ) : null}
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface GameViewProps {
   session: Session;
   roomState: PublicRoomState;
@@ -1279,6 +1441,7 @@ function GameView(props: GameViewProps): JSX.Element {
   const [panelFeedback, setPanelFeedback] = useState<"pass" | "boom" | null>(null);
   const [inputRejected, setInputRejected] = useState(false);
   const previousEventRef = useRef(props.roomState.lastEvent);
+  const turnPanelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (previousEventRef.current === props.roomState.lastEvent) {
@@ -1328,205 +1491,153 @@ function GameView(props: GameViewProps): JSX.Element {
   }, [props.errorMessage, props.errorVersion]);
 
   return (
-    <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
-      <div className="space-y-4">
-        <div className="card px-4 py-4 sm:px-5">
-          <TurnOrderRow roomState={props.roomState} session={props.session} />
-        </div>
-
-        {localPlayerOut ? (
-          <div
-            className="rounded-2xl border border-danger/35 bg-danger/10 px-4 py-3 text-center text-sm font-semibold uppercase tracking-[0.26em] text-danger"
-            role="status"
-            aria-live="polite"
-          >
-            You are out this round
-          </div>
-        ) : null}
-
-        <div
-          className={`panel-turn min-h-[30rem] px-4 py-5 sm:px-6 sm:py-6 lg:min-h-[34rem] ${
-            props.isYourTurn ? "panel-turn-active motion-safe:animate-panel-pulse" : ""
-          } ${panelFeedback === "pass" ? "panel-turn-pass motion-safe:animate-pass-burst" : ""} ${
-            panelFeedback === "boom" ? "panel-turn-boom motion-safe:animate-boom-flash" : ""
-          }`}
-        >
-          <div className="relative z-10 flex h-full flex-col items-center text-center">
-            <div className="flex w-full justify-center">
-              <div
-                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.32em] ${
-                  props.isYourTurn
-                    ? "border-neonCyan/40 bg-neonCyan/12 text-neonCyan"
-                    : "border-white/15 bg-white/8 text-sand/78"
-                }`}
-                role="status"
-                aria-live="polite"
-              >
-                {props.isYourTurn ? (
-                  <>
-                    <Sparkles className="size-4" aria-hidden="true" />
-                    Your Turn
-                  </>
-                ) : (
-                  activeTurnLabel
-                )}
-              </div>
-            </div>
-
-            <div className="relative flex w-full flex-1 items-center justify-center py-6 sm:py-8">
-              <TimerRing
-                remainingMs={props.roomState.remainingMs}
-                turnDurationSeconds={props.roomState.turnDurationSeconds}
-                turnNumber={props.roomState.turnNumber}
-              />
-
-              <div className="relative z-10 flex max-w-[32rem] flex-col items-center">
-                <div className="inline-flex flex-wrap items-end justify-center gap-3">
-                  <span className="font-display text-[clamp(5rem,18vw,9rem)] uppercase leading-none text-sand text-shadow-neon">
-                    {props.roomState.currentChunk ?? "--"}
-                  </span>
-                  {chunkTierLabel ? (
-                    <span className="hidden">
-                      {chunkTierLabel} • {chunkCoverageLabel}
-                    </span>
-                  ) : null}
-                </div>
-
-                <div className="hidden">
-                  <RoleTag label={`Turn ${props.roomState.turnNumber}`} tone="cyan" />
-                  <RoleTag label={`${props.roomState.turnDurationSeconds}s`} />
-                  <RoleTag
-                    label={props.roomState.config.allowFourLetterChunks ? "2-4 Letters" : "2-3 Letters"}
-                  />
-                  {targetDifficultyLabel ? <RoleTag label={`Target ${targetDifficultyLabel}`} tone="orange" /> : null}
-                  {props.roomState.globalStageIndex > 0 ? (
-                    <RoleTag label={`Stage ${props.roomState.globalStageIndex + 1}`} />
-                  ) : null}
-                </div>
-
-                <div className="mt-4 flex flex-wrap justify-center gap-2">
-                  {chunkTierLabel ? (
-                    <span className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/72">
-                      {chunkTierLabel} | {chunkCoverageLabel}
-                    </span>
-                  ) : null}
-                  <span className="rounded-full border border-white/10 bg-black/15 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/60">
-                    {chunkLengthLabel}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="w-full max-w-3xl">
-              <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">{typingLabel}</p>
-              <div
-                className={`mt-4 font-display text-[clamp(2.5rem,7vw,5rem)] uppercase leading-[0.92] ${
-                  props.typingState.isTyping ? "text-sand text-shadow-neon" : "text-sand/32"
-                }`}
-                aria-live="polite"
-              >
-                {typingPreviewText}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <form className="card px-4 py-4 sm:px-5" onSubmit={props.onSubmitWord}>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <input
-              ref={props.wordInputRef}
-              className={`arcade-input flex-1 px-5 py-4 text-base sm:text-lg ${
-                props.isYourTurn ? "shadow-glow-cyan" : ""
-              } ${
-                inputRejected
-                  ? "border-danger/60 text-danger motion-safe:animate-shake-retro focus:border-danger/70 focus:ring-danger/20"
-                  : ""
-              }`}
-              value={props.wordDraft}
-              onChange={(event) => props.onWordDraft(event.target.value)}
-              maxLength={30}
-              placeholder={
-                localPlayerOut
-                  ? "Cabinet locked for this round"
-                  : props.canSubmit
-                    ? "Type a word containing the chunk"
-                    : "Warm up here while you wait"
-              }
-              autoCapitalize="none"
-              autoCorrect="off"
-              autoComplete="off"
-              spellCheck={false}
-              disabled={localPlayerOut}
-            />
-            <button
-              className="btn-primary px-6 text-base sm:min-w-[168px]"
-              type="submit"
-              disabled={localPlayerOut || !props.canSubmit || props.wordDraft.trim().length === 0}
-              title={!props.canSubmit && !localPlayerOut ? "Wait for your turn to submit." : undefined}
-            >
-              <Zap className="size-4" aria-hidden="true" />
-              Submit Word
-            </button>
-          </div>
-
-          <p className="mt-3 text-xs text-sand/54 sm:text-sm">
-            {localPlayerOut
-              ? "Spectating only until the next round."
-              : props.canSubmit
-                ? "Submit one valid word containing the live chunk."
-                : "Submit unlocks when the bomb reaches you."}
-          </p>
-        </form>
+    <section className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <div className="card px-4 py-4 sm:px-5">
+        <TurnOrderRow roomState={props.roomState} session={props.session} />
       </div>
 
-      <aside className="space-y-4">
-        <ScoreboardPanel
-          title="Scoreboard"
-          roomState={props.roomState}
-          session={props.session}
-          isHost={props.isHost}
-          onToggleTypingPreviews={props.onToggleTypingPreviews}
-          mobileCollapsible
+      {localPlayerOut ? (
+        <div
+          className="rounded-2xl border border-danger/35 bg-danger/10 px-4 py-3 text-center text-sm font-semibold uppercase tracking-[0.26em] text-danger"
+          role="status"
+          aria-live="polite"
+        >
+          You are out this round
+        </div>
+      ) : null}
+
+      <div
+        ref={turnPanelRef}
+        className={`panel-turn min-h-[30rem] px-4 py-5 sm:px-6 sm:py-6 lg:min-h-[34rem] ${
+          props.isYourTurn ? "panel-turn-active motion-safe:animate-panel-pulse" : ""
+        } ${panelFeedback === "pass" ? "panel-turn-pass motion-safe:animate-pass-burst" : ""} ${
+          panelFeedback === "boom" ? "panel-turn-boom motion-safe:animate-boom-flash" : ""
+        }`}
+      >
+        <BorderTimer
+          containerRef={turnPanelRef}
+          remainingMs={props.roomState.remainingMs}
+          turnDurationSeconds={props.roomState.turnDurationSeconds}
+          turnNumber={props.roomState.turnNumber}
         />
 
-        <div className="card px-4 py-4 sm:px-5">
-          <p className="text-xs uppercase tracking-[0.3em] text-neonPurple/80">Room Pulse</p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
-            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
-                <TimerReset className="size-4 text-neonCyan" aria-hidden="true" />
-                Turn Timer
-              </div>
-              <p className="mt-2 text-sm text-sand/58">{props.roomState.turnDurationSeconds}s per turn</p>
+        <div className="relative z-20 flex h-full flex-col items-center text-center">
+          <div className="flex w-full justify-center">
+            <div
+              className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.32em] ${
+                props.isYourTurn
+                  ? "border-neonCyan/40 bg-neonCyan/12 text-neonCyan"
+                  : "border-white/15 bg-white/8 text-sand/78"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {props.isYourTurn ? (
+                <>
+                  <Sparkles className="size-4" aria-hidden="true" />
+                  Your Turn
+                </>
+              ) : (
+                activeTurnLabel
+              )}
             </div>
+          </div>
 
-            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
-                <Zap className="size-4 text-sunsetOrange" aria-hidden="true" />
-                Chunk Pool
+          <div className="relative flex w-full flex-1 flex-col items-center justify-center py-8 sm:py-10">
+            <TurnCountdownReadout
+              remainingMs={props.roomState.remainingMs}
+              turnNumber={props.roomState.turnNumber}
+            />
+
+            <div className="relative z-10 flex w-full max-w-[34rem] flex-col items-center gap-6">
+              <div className="inline-flex flex-wrap items-end justify-center gap-3">
+                <span className="font-display text-[clamp(5rem,18vw,9rem)] uppercase leading-none text-sand text-shadow-neon">
+                  {props.roomState.currentChunk ?? "--"}
+                </span>
               </div>
-              <p className="mt-2 text-sm text-sand/58">
-                {chunkLengthLabel}
-                {targetDifficultyLabel ? ` | target ${targetDifficultyLabel}` : ""}
-              </p>
+
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                {chunkTierLabel ? (
+                  <span className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/72">
+                    {chunkTierLabel} | {chunkCoverageLabel}
+                  </span>
+                ) : null}
+                <span className="rounded-full border border-white/10 bg-black/15 px-4 py-2 text-xs uppercase tracking-[0.24em] text-sand/60">
+                  {chunkLengthLabel}
+                </span>
+              </div>
             </div>
+          </div>
 
-            <div className="rounded-2xl border border-white/10 bg-ocean/40 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-sand">
-                {props.roomState.config.showTypingPreviews ? (
-                  <Eye className="size-4 text-success" aria-hidden="true" />
-                ) : (
-                  <EyeOff className="size-4 text-sunsetOrange" aria-hidden="true" />
-                )}
-                Typing Preview
-              </div>
-              <p className="mt-2 text-sm text-sand/58">
-                {props.roomState.config.showTypingPreviews ? "Visible to everyone." : "Hidden behind typing..."}
-              </p>
+          <div className="w-full max-w-3xl">
+            <p className="text-xs uppercase tracking-[0.3em] text-neonCyan/80">{typingLabel}</p>
+            <div
+              className={`mt-4 font-display text-[clamp(2.5rem,7vw,5rem)] uppercase leading-[0.92] ${
+                props.typingState.isTyping ? "text-sand text-shadow-neon" : "text-sand/32"
+              }`}
+              aria-live="polite"
+            >
+              {typingPreviewText}
             </div>
           </div>
         </div>
-      </aside>
+      </div>
+
+      <form className="card px-4 py-4 sm:px-5" onSubmit={props.onSubmitWord}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <input
+            ref={props.wordInputRef}
+            className={`arcade-input flex-1 px-5 py-4 text-base sm:text-lg ${
+              props.isYourTurn ? "shadow-glow-cyan" : ""
+            } ${
+              inputRejected
+                ? "border-danger/60 text-danger motion-safe:animate-shake-retro focus:border-danger/70 focus:ring-danger/20"
+                : ""
+            }`}
+            value={props.wordDraft}
+            onChange={(event) => props.onWordDraft(event.target.value)}
+            maxLength={30}
+            placeholder={
+              localPlayerOut
+                ? "Cabinet locked for this round"
+                : props.canSubmit
+                  ? "Type a word containing the chunk"
+                  : "Warm up here while you wait"
+            }
+            autoCapitalize="none"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={localPlayerOut}
+          />
+          <button
+            className="btn-primary px-6 text-base sm:min-w-[168px]"
+            type="submit"
+            disabled={localPlayerOut || !props.canSubmit || props.wordDraft.trim().length === 0}
+            title={!props.canSubmit && !localPlayerOut ? "Wait for your turn to submit." : undefined}
+          >
+            <Zap className="size-4" aria-hidden="true" />
+            Submit Word
+          </button>
+        </div>
+
+        <p className="mt-3 text-xs text-sand/54 sm:text-sm">
+          {localPlayerOut
+            ? "Spectating only until the next round."
+            : props.canSubmit
+              ? "Submit one valid word containing the live chunk."
+              : "Submit unlocks when the bomb reaches you."}
+        </p>
+      </form>
+
+      <GameDetailsDrawer
+        session={props.session}
+        roomState={props.roomState}
+        isHost={props.isHost}
+        chunkLengthLabel={chunkLengthLabel}
+        targetDifficultyLabel={targetDifficultyLabel}
+        onToggleTypingPreviews={props.onToggleTypingPreviews}
+      />
     </section>
   );
 }

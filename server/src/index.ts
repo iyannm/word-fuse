@@ -9,6 +9,7 @@ import {
   AckResponse,
   CreateRoomPayload,
   JoinRoomPayload,
+  PlayerTypingPayload,
   PlayerActionPayload,
   ReconnectPayload,
   SubmitWordPayload,
@@ -106,6 +107,10 @@ io.on("connection", (socket) => {
       ackWith(gameService.toAck(result), ack);
     },
   );
+
+  socket.on("player:typing", (payload: PlayerTypingPayload) => {
+    gameService.handleTyping(socket.id, payload);
+  });
 
   socket.on("disconnect", () => {
     gameService.handleDisconnect(socket.id);

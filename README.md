@@ -24,18 +24,27 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
   - Turn timer: 5-20 seconds
   - Starting lives: 1-5
   - Dictionary validation on/off
+  - Live typing previews on/off
 - Server-authoritative gameplay:
   - Active player must submit an unused alphabetic word (>=3 letters)
   - Word must contain required chunk
   - Optional dictionary validation from local `wordlist.txt`
   - Correct word passes bomb to next eligible player and resets timer
   - Timer expiry removes life; elimination at 0 lives
+- Active-turn live typing feedback:
+  - Only the active player's preview is shared with the room
+  - Preview text persists for the full active turn once typing starts
+  - Host can hide preview text and keep only an `is typing...` indicator
 - Deterministic clockwise turn order based on lobby join order
 - Eliminated and disconnected players are skipped for active turns
 - Host reassignment on host disconnect (earliest joined connected player)
 - Results screen with winner and final scoreboard
 - Reconnect-aware client with connection status banner
 - Basic rate limit on submissions (1 every 300ms per socket)
+- Typing preview sanitization and rate limits:
+  - Preview strips non-letters, normalizes to uppercase, and caps at 24 characters
+  - Server accepts at most 8 typing events per second per socket
+  - Client throttles outbound typing events to 8 per second
 
 ## Environment Defaults
 

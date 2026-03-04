@@ -29,6 +29,16 @@ export function sanitizeWord(input: string): string {
     .toLowerCase();
 }
 
+export function sanitizeTypingPreview(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase()
+    .slice(0, 24);
+}
+
 export function createRoomCode(existingCodes: Set<string>): string {
   for (let attempt = 0; attempt < 10_000; attempt += 1) {
     let next = "";

@@ -1,6 +1,13 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { socket } from "./socket";
-import { AckResponse, PublicPlayerState, PublicRoomState, RoomConfig, Session } from "./types";
+import {
+  AckResponse,
+  PublicPlayerState,
+  PublicRoomState,
+  RoomConfig,
+  Session,
+  TypingState,
+} from "./types";
 
 const SESSION_KEY = "word-fuse-session";
 
@@ -65,6 +72,31 @@ function normalizeWordForSubmit(input: string): string {
     .trim()
     .toLowerCase();
 }
+
+function normalizeTypingPreview(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase()
+    .slice(0, 24);
+}
+
+function createBlankTypingState(activePlayerId: string | null = null): TypingState {
+  return {
+    activePlayerId,
+    isTyping: false,
+    text: "",
+  };
+}
+
+const MIN_ERROR_DISPLAY_MS = 3000;
+const LONG_DISPLAY_ERRORS = new Set([
+  "Word not found in dictionary.",
+  "Word already used in this match.",
+]);
+const TYPING_THROTTLE_MS = 125;
 
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -211,6 +243,18 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
             Dictionary validation enabled
           </label>
 
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={props.roomState.config.showTypingPreviews}
+              disabled={!props.isHost}
+              onChange={(event) =>
+                props.onUpdateSettings({ showTypingPreviews: event.target.checked })
+              }
+            />
+            Show live typing previews
+          </label>
+
           {props.isHost ? (
             <button type="button" onClick={props.onStart} disabled={!props.roomState.canStart}>
               Start Game
@@ -231,10 +275,15 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
 interface GameViewProps {
   session: Session;
   roomState: PublicRoomState;
+  typingState: TypingState;
   wordDraft: string;
   onWordDraft: (value: string) => void;
   onSubmitWord: (event: FormEvent) => void;
+  onToggleTypingPreviews: (enabled: boolean) => void;
   canSubmit: boolean;
+  isHost: boolean;
+  isYourTurn: boolean;
+  wordInputRef: RefObject<HTMLInputElement>;
   onLeave: () => void;
 }
 
@@ -242,7 +291,11 @@ function GameView(props: GameViewProps): JSX.Element {
   const activePlayer = props.roomState.players.find(
     (player) => player.id === props.roomState.activePlayerId,
   );
+  const typingPlayer = props.roomState.players.find(
+    (player) => player.id === (props.typingState.activePlayerId ?? props.roomState.activePlayerId),
+  );
   const secondsLeft = Math.max(0, Math.ceil(props.roomState.remainingMs / 1000));
+  const liveAttemptPreview = props.typingState.text || "...";
 
   return (
     <section className="view-card">
@@ -251,19 +304,52 @@ function GameView(props: GameViewProps): JSX.Element {
         <div className="room-code">Room: {props.roomState.roomCode}</div>
       </div>
 
-      <div className="bomb-area">
+      {props.isYourTurn ? (
+        <div className="turn-callout" role="status" aria-live="polite">
+          <span className="turn-callout-mark">GO!</span>
+          <span>Your Turn</span>
+        </div>
+      ) : null}
+
+      <div className={props.isYourTurn ? "bomb-area active-turn" : "bomb-area"}>
         <div className="chunk">{props.roomState.currentChunk ?? "--"}</div>
         <div className={secondsLeft <= 3 ? "timer danger" : "timer"}>{secondsLeft}s</div>
         <div className="active-player">Active: {activePlayer?.name ?? "Waiting"}</div>
       </div>
 
+      <div
+        className={
+          props.typingState.isTyping
+            ? props.roomState.config.showTypingPreviews
+              ? "typing-status"
+              : "typing-status preview-hidden"
+            : "typing-status idle"
+        }
+        aria-live="polite"
+      >
+        <div className="typing-label">Live Attempt</div>
+        {props.typingState.isTyping && typingPlayer ? (
+          props.roomState.config.showTypingPreviews ? (
+            <>
+              <div className="typing-copy">{typingPlayer.name} typing:</div>
+              <div className="typing-preview">{liveAttemptPreview}</div>
+            </>
+          ) : (
+            <div className="typing-copy">{typingPlayer.name} is typing...</div>
+          )
+        ) : (
+          <div className="typing-copy subtle">Waiting for input...</div>
+        )}
+      </div>
+
       <form className="word-form" onSubmit={props.onSubmitWord}>
         <input
+          ref={props.wordInputRef}
+          className={props.canSubmit ? "turn-input" : ""}
           value={props.wordDraft}
           onChange={(event) => props.onWordDraft(event.target.value)}
           maxLength={30}
-          placeholder={props.canSubmit ? "Type a word" : "Wait for your turn"}
-          disabled={!props.canSubmit}
+          placeholder={props.canSubmit ? "Type a word" : "Type to practice while you wait"}
           autoCapitalize="none"
           autoCorrect="off"
           autoComplete="off"
@@ -295,6 +381,21 @@ function GameView(props: GameViewProps): JSX.Element {
         </div>
 
         <div className="panel">
+          {props.isHost ? (
+            <label className="checkbox-row typing-settings">
+              <input
+                type="checkbox"
+                checked={props.roomState.config.showTypingPreviews}
+                onChange={(event) => props.onToggleTypingPreviews(event.target.checked)}
+              />
+              Show live typing previews
+            </label>
+          ) : (
+            <p className="small-note">
+              Typing previews: {props.roomState.config.showTypingPreviews ? "On" : "Hidden"}
+            </p>
+          )}
+
           <h3>Used Words ({props.roomState.usedWords.length})</h3>
           <div className="used-words">
             {props.roomState.usedWords.length === 0 ? (
@@ -378,11 +479,21 @@ function ResultsView(props: ResultsViewProps): JSX.Element {
 export default function App(): JSX.Element {
   const [session, setSession] = useState<Session | null>(() => loadStoredSession());
   const [roomState, setRoomState] = useState<PublicRoomState | null>(null);
+  const [typingState, setTypingState] = useState<TypingState>(() => createBlankTypingState());
   const [createName, setCreateName] = useState("");
   const [joinName, setJoinName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [wordDraft, setWordDraft] = useState("");
   const [error, setError] = useState("");
+  const wordInputRef = useRef<HTMLInputElement>(null);
+  const errorMinVisibleUntilRef = useRef(0);
+  const errorClearTimeoutRef = useRef<number | null>(null);
+  const sessionRef = useRef<Session | null>(session);
+  const roomStateRef = useRef<PublicRoomState | null>(roomState);
+  const canBroadcastTypingRef = useRef(false);
+  const lastTypingSentAtRef = useRef(0);
+  const pendingTypingPreviewRef = useRef<string | null>(null);
+  const typingSendTimeoutRef = useRef<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(
     socket.connected ? "connected" : "connecting",
   );
@@ -395,6 +506,123 @@ export default function App(): JSX.Element {
       clearStoredSession();
     }
   }, []);
+
+  const clearScheduledErrorClear = useCallback((): void => {
+    if (errorClearTimeoutRef.current !== null) {
+      window.clearTimeout(errorClearTimeoutRef.current);
+      errorClearTimeoutRef.current = null;
+    }
+  }, []);
+
+  const clearError = useCallback(
+    (force = false): void => {
+      if (!force && Date.now() < errorMinVisibleUntilRef.current) {
+        return;
+      }
+
+      clearScheduledErrorClear();
+      errorMinVisibleUntilRef.current = 0;
+      setError("");
+    },
+    [clearScheduledErrorClear],
+  );
+
+  const showError = useCallback(
+    (message: string): void => {
+      setError(message);
+
+      if (!LONG_DISPLAY_ERRORS.has(message)) {
+        errorMinVisibleUntilRef.current = 0;
+        clearScheduledErrorClear();
+        return;
+      }
+
+      errorMinVisibleUntilRef.current = Date.now() + MIN_ERROR_DISPLAY_MS;
+      clearScheduledErrorClear();
+
+      errorClearTimeoutRef.current = window.setTimeout(() => {
+        if (Date.now() >= errorMinVisibleUntilRef.current) {
+          setError("");
+          errorMinVisibleUntilRef.current = 0;
+          errorClearTimeoutRef.current = null;
+        }
+      }, MIN_ERROR_DISPLAY_MS);
+    },
+    [clearScheduledErrorClear],
+  );
+
+  const clearPendingTypingSend = useCallback((): void => {
+    if (typingSendTimeoutRef.current !== null) {
+      window.clearTimeout(typingSendTimeoutRef.current);
+      typingSendTimeoutRef.current = null;
+    }
+    pendingTypingPreviewRef.current = null;
+  }, []);
+
+  const flushPendingTypingPreview = useCallback((): void => {
+    if (typingSendTimeoutRef.current !== null) {
+      window.clearTimeout(typingSendTimeoutRef.current);
+      typingSendTimeoutRef.current = null;
+    }
+
+    const nextPreview = pendingTypingPreviewRef.current;
+    pendingTypingPreviewRef.current = null;
+
+    if (!nextPreview || !canBroadcastTypingRef.current || !sessionRef.current || !roomStateRef.current) {
+      if (nextPreview === "") {
+        if (
+          canBroadcastTypingRef.current &&
+          sessionRef.current &&
+          roomStateRef.current
+        ) {
+          socket.emit("player:typing", {
+            roomCode: sessionRef.current.roomCode,
+            preview: nextPreview,
+          });
+          lastTypingSentAtRef.current = Date.now();
+        }
+      }
+      return;
+    }
+
+    socket.emit("player:typing", {
+      roomCode: sessionRef.current.roomCode,
+      preview: nextPreview,
+    });
+    lastTypingSentAtRef.current = Date.now();
+  }, []);
+
+  const queueTypingPreview = useCallback(
+    (preview: string): void => {
+      if (!canBroadcastTypingRef.current || !sessionRef.current || !roomStateRef.current) {
+        return;
+      }
+
+      pendingTypingPreviewRef.current = preview;
+
+      const elapsed = Date.now() - lastTypingSentAtRef.current;
+      if (elapsed >= TYPING_THROTTLE_MS) {
+        flushPendingTypingPreview();
+        return;
+      }
+
+      if (typingSendTimeoutRef.current !== null) {
+        window.clearTimeout(typingSendTimeoutRef.current);
+      }
+
+      typingSendTimeoutRef.current = window.setTimeout(() => {
+        flushPendingTypingPreview();
+      }, TYPING_THROTTLE_MS - elapsed);
+    },
+    [flushPendingTypingPreview],
+  );
+
+  useEffect(() => {
+    return () => {
+      clearScheduledErrorClear();
+      clearPendingTypingSend();
+    };
+  }, [clearPendingTypingSend, clearScheduledErrorClear]);
 
   const attemptReconnect = useCallback(
     (targetSession: Session | null) => {
@@ -412,18 +640,20 @@ export default function App(): JSX.Element {
         (response: AckResponse) => {
           if (response.ok && response.state) {
             setRoomState(response.state);
-            setError("");
+            setTypingState(createBlankTypingState(response.state.activePlayerId));
+            clearError(true);
           } else {
             saveSession(null);
             setRoomState(null);
+            setTypingState(createBlankTypingState());
             if (response.error) {
-              setError(response.error);
+              showError(response.error);
             }
           }
         },
       );
     },
-    [saveSession],
+    [clearError, saveSession, showError],
   );
 
   useEffect(() => {
@@ -446,12 +676,17 @@ export default function App(): JSX.Element {
 
     const onRoomUpdate = (state: PublicRoomState): void => {
       setRoomState(state);
-      setError("");
+      clearError();
+    };
+
+    const onTypingState = (nextTypingState: TypingState): void => {
+      setTypingState(nextTypingState);
     };
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("room:update", onRoomUpdate);
+    socket.on("room:typingState", onTypingState);
     socket.io.on("reconnect_attempt", onReconnectAttempt);
     socket.io.on("reconnect_failed", onReconnectFailed);
 
@@ -463,10 +698,11 @@ export default function App(): JSX.Element {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
       socket.off("room:update", onRoomUpdate);
+      socket.off("room:typingState", onTypingState);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
       socket.io.off("reconnect_failed", onReconnectFailed);
     };
-  }, [attemptReconnect]);
+  }, [attemptReconnect, clearError]);
 
   const me = useMemo(() => {
     if (!roomState || !session) {
@@ -484,9 +720,51 @@ export default function App(): JSX.Element {
     connectionStatus === "connected" &&
     !me?.eliminated;
 
+  useEffect(() => {
+    sessionRef.current = session;
+    roomStateRef.current = roomState;
+    canBroadcastTypingRef.current = canSubmit;
+  }, [canSubmit, roomState, session]);
+
+  useEffect(() => {
+    if (!roomState || roomState.phase !== "in_game") {
+      setTypingState(createBlankTypingState());
+      return;
+    }
+
+    setTypingState((current) =>
+      current.activePlayerId === roomState.activePlayerId
+        ? current
+        : createBlankTypingState(roomState.activePlayerId),
+    );
+  }, [roomState?.activePlayerId, roomState?.phase]);
+
+  useEffect(() => {
+    if (canSubmit) {
+      return;
+    }
+
+    clearPendingTypingSend();
+  }, [canSubmit, clearPendingTypingSend]);
+
+  useEffect(() => {
+    if (!canSubmit) {
+      return;
+    }
+
+    const focusId = window.setTimeout(() => {
+      wordInputRef.current?.focus();
+      wordInputRef.current?.select();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(focusId);
+    };
+  }, [canSubmit, roomState?.activePlayerId]);
+
   const createOrJoinSessionFromAck = (response: AckResponse, fallbackName: string): void => {
     if (!response.ok || !response.roomCode || !response.playerId || !response.state) {
-      setError(response.error ?? "Unable to join room.");
+      showError(response.error ?? "Unable to join room.");
       return;
     }
 
@@ -500,13 +778,14 @@ export default function App(): JSX.Element {
 
     saveSession(nextSession);
     setRoomState(response.state);
-    setError("");
+    setTypingState(createBlankTypingState(response.state.activePlayerId));
+    clearError(true);
     setWordDraft("");
   };
 
   const handleCreateRoom = (event: FormEvent): void => {
     event.preventDefault();
-    setError("");
+    clearError(true);
 
     socket.emit("room:create", { name: createName }, (response: AckResponse) => {
       createOrJoinSessionFromAck(response, createName);
@@ -518,7 +797,7 @@ export default function App(): JSX.Element {
 
   const handleJoinRoom = (event: FormEvent): void => {
     event.preventDefault();
-    setError("");
+    clearError(true);
 
     socket.emit(
       "room:join",
@@ -546,10 +825,20 @@ export default function App(): JSX.Element {
       },
       (response: AckResponse) => {
         if (!response.ok) {
-          setError(response.error ?? "Could not update settings.");
+          showError(response.error ?? "Could not update settings.");
         }
       },
     );
+  };
+
+  const handleWordDraftChange = (value: string): void => {
+    setWordDraft(value);
+
+    if (!canSubmit) {
+      return;
+    }
+
+    queueTypingPreview(normalizeTypingPreview(value));
   };
 
   const handleStartGame = (): void => {
@@ -565,7 +854,7 @@ export default function App(): JSX.Element {
       },
       (response: AckResponse) => {
         if (!response.ok) {
-          setError(response.error ?? "Could not start game.");
+          showError(response.error ?? "Could not start game.");
         }
       },
     );
@@ -578,7 +867,11 @@ export default function App(): JSX.Element {
     }
 
     const word = normalizeWordForSubmit(wordDraft);
+    setWordDraft("");
+    queueTypingPreview("");
+
     if (!word) {
+      wordInputRef.current?.focus();
       return;
     }
 
@@ -591,12 +884,12 @@ export default function App(): JSX.Element {
       },
       (response: AckResponse) => {
         if (!response.ok) {
-          setError(response.error ?? "Word rejected.");
+          showError(response.error ?? "Word rejected.");
+          wordInputRef.current?.focus();
           return;
         }
 
-        setWordDraft("");
-        setError("");
+        clearError(true);
       },
     );
   };
@@ -614,7 +907,7 @@ export default function App(): JSX.Element {
       },
       (response: AckResponse) => {
         if (!response.ok) {
-          setError(response.error ?? "Could not reset match.");
+          showError(response.error ?? "Could not reset match.");
         }
       },
     );
@@ -623,7 +916,9 @@ export default function App(): JSX.Element {
   const handleLeaveRoom = (): void => {
     saveSession(null);
     setRoomState(null);
-    setError("");
+    setTypingState(createBlankTypingState());
+    clearError(true);
+    clearPendingTypingSend();
     setWordDraft("");
     setJoinCode("");
 
@@ -633,9 +928,10 @@ export default function App(): JSX.Element {
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${canSubmit ? "your-turn-active" : ""}`}>
       <header className="app-header">
-        <div>
+        <div className="title-wrap">
+          <div className="island-chip">University of Guam Island Edition</div>
           <h1>Word Fuse</h1>
           <p className="subtitle">Fast multiplayer word survival.</p>
         </div>
@@ -687,10 +983,17 @@ export default function App(): JSX.Element {
         <GameView
           session={session}
           roomState={roomState}
+          typingState={typingState}
           wordDraft={wordDraft}
-          onWordDraft={setWordDraft}
+          onWordDraft={handleWordDraftChange}
           onSubmitWord={handleSubmitWord}
+          onToggleTypingPreviews={(showTypingPreviews) =>
+            handleUpdateSettings({ showTypingPreviews })
+          }
           canSubmit={canSubmit}
+          isHost={isHost}
+          isYourTurn={canSubmit}
+          wordInputRef={wordInputRef}
           onLeave={handleLeaveRoom}
         />
       ) : null}

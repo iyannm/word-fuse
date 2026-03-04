@@ -4,6 +4,7 @@ export interface RoomConfig {
   turnSeconds: number;
   startingLives: number;
   dictionaryEnabled: boolean;
+  showTypingPreviews: boolean;
 }
 
 export interface PublicPlayerState {
@@ -44,4 +45,10 @@ export interface Session {
   roomCode: string;
   playerId: string;
   name: string;
+}
+
+export interface TypingState {
+  activePlayerId: string | null;
+  isTyping: boolean;
+  text: string;
 }

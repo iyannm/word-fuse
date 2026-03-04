@@ -4,6 +4,14 @@ export interface RoomConfig {
   turnSeconds: number;
   startingLives: number;
   dictionaryEnabled: boolean;
+  showTypingPreviews: boolean;
+}
+
+export interface ActiveTurnTypingState {
+  playerId: string | null;
+  preview: string;
+  isTyping: boolean;
+  updatedAt: number;
 }
 
 export interface PlayerState {
@@ -31,6 +39,7 @@ export interface RoomState {
   timerEndsAt: number | null;
   winnerId: string | null;
   lastEvent: string;
+  activeTurnTyping: ActiveTurnTypingState;
   createdAt: number;
   updatedAt: number;
   emptySince: number | null;
@@ -91,6 +100,7 @@ export interface UpdateSettingsPayload {
   turnSeconds?: number;
   startingLives?: number;
   dictionaryEnabled?: boolean;
+  showTypingPreviews?: boolean;
 }
 
 export interface PlayerActionPayload {
@@ -100,4 +110,15 @@ export interface PlayerActionPayload {
 
 export interface SubmitWordPayload extends PlayerActionPayload {
   word: string;
+}
+
+export interface PlayerTypingPayload {
+  roomCode: string;
+  preview: string;
+}
+
+export interface PublicTypingState {
+  activePlayerId: string | null;
+  isTyping: boolean;
+  text: string;
 }

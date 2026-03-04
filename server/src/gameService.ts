@@ -1,10 +1,12 @@
 import { Server } from "socket.io";
 import { Dictionary } from "./dictionary";
 import {
+  PublicTypingState,
   PublicRoomState,
   RoomState,
   PlayerState,
   AckResponse,
+  PlayerTypingPayload,
   UpdateSettingsPayload,
   SubmitWordPayload,
   PlayerActionPayload,
@@ -15,6 +17,7 @@ import {
   createRoomCode,
   sanitizePlayerName,
   sanitizeRoomCode,
+  sanitizeTypingPreview,
   sanitizeWord,
 } from "./utils";
 
@@ -28,6 +31,8 @@ const MIN_PLAYERS_TO_START = 2;
 const MAX_PLAYERS_PER_ROOM = 12;
 const TIMER_TICK_MS = 250;
 const SUBMIT_RATE_LIMIT_MS = 300;
+const TYPING_RATE_LIMIT_WINDOW_MS = 1000;
+const MAX_TYPING_EVENTS_PER_WINDOW = 8;
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000;
 
 const CHUNKS = [
@@ -80,6 +85,7 @@ export class GameService {
   private readonly rooms = new Map<string, RoomState>();
   private readonly socketSessions = new Map<string, SocketSession>();
   private readonly lastSubmitAtBySocket = new Map<string, number>();
+  private readonly typingEventTimesBySocket = new Map<string, number[]>();
 
   constructor(
     private readonly io: Server,
@@ -117,6 +123,7 @@ export class GameService {
         turnSeconds: DEFAULT_TURN_SECONDS,
         startingLives: DEFAULT_STARTING_LIVES,
         dictionaryEnabled: this.dictionary.enabled,
+        showTypingPreviews: true,
       },
       players: [host],
       usedWords: new Set<string>(),
@@ -127,6 +134,7 @@ export class GameService {
       timerEndsAt: null,
       winnerId: null,
       lastEvent: "Room created. Waiting for players.",
+      activeTurnTyping: this.createActiveTurnTypingState(null),
       createdAt: Date.now(),
       updatedAt: Date.now(),
       emptySince: null,
@@ -136,6 +144,7 @@ export class GameService {
     this.bindSocketSession(socketId, roomCode, playerId);
 
     this.io.sockets.sockets.get(socketId)?.join(roomCode);
+    this.emitTypingState(room, socketId);
 
     return {
       ok: true,
@@ -199,6 +208,7 @@ export class GameService {
     this.io.sockets.sockets.get(socketId)?.join(room.code);
 
     this.broadcastRoom(room);
+    this.emitTypingState(room, socketId);
 
     return {
       ok: true,
@@ -249,6 +259,7 @@ export class GameService {
       const next = this.getNextEligiblePlayer(room, null);
       if (next) {
         room.activePlayerId = next.id;
+        this.resetActiveTurnTyping(room, next.id);
         room.currentChunk = this.chooseChunk(room, room.currentChunk);
         room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
       }
@@ -256,6 +267,7 @@ export class GameService {
 
     room.updatedAt = Date.now();
     this.broadcastRoom(room);
+    this.emitTypingState(room);
 
     return {
       ok: true,
@@ -277,12 +289,17 @@ export class GameService {
       return { ok: false, error: "Action not allowed for this socket." };
     }
 
-    if (room.phase !== "lobby") {
-      return { ok: false, error: "Settings can only be changed in lobby." };
-    }
-
     if (room.hostId !== payload.playerId) {
       return { ok: false, error: "Only the host can change settings." };
+    }
+
+    const hasLobbyOnlyUpdates =
+      typeof payload.turnSeconds === "number" ||
+      typeof payload.startingLives === "number" ||
+      typeof payload.dictionaryEnabled === "boolean";
+
+    if (hasLobbyOnlyUpdates && room.phase !== "lobby") {
+      return { ok: false, error: "Turn timer, lives, and dictionary can only be changed in lobby." };
     }
 
     if (typeof payload.turnSeconds === "number") {
@@ -301,10 +318,17 @@ export class GameService {
       room.config.dictionaryEnabled = payload.dictionaryEnabled && this.dictionary.enabled;
     }
 
+    if (typeof payload.showTypingPreviews === "boolean") {
+      room.config.showTypingPreviews = payload.showTypingPreviews;
+    }
+
     room.updatedAt = Date.now();
     room.lastEvent = "Host updated game settings.";
 
     this.broadcastRoom(room);
+    if (typeof payload.showTypingPreviews === "boolean") {
+      this.emitTypingState(room);
+    }
 
     return { ok: true, state: this.serializeRoom(room) };
   }
@@ -353,12 +377,14 @@ export class GameService {
     }
 
     room.activePlayerId = firstActive.id;
+    this.resetActiveTurnTyping(room, firstActive.id);
     room.currentChunk = this.chooseChunk(room, null);
     room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
     room.lastEvent = `${firstActive.name} starts with the bomb.`;
     room.updatedAt = Date.now();
 
     this.broadcastRoom(room);
+    this.emitTypingState(room);
 
     return { ok: true, state: this.serializeRoom(room) };
   }
@@ -426,6 +452,7 @@ export class GameService {
     room.updatedAt = Date.now();
 
     this.broadcastRoom(room);
+    this.emitTypingState(room);
 
     return { ok: true, state: this.serializeRoom(room) };
   }
@@ -458,6 +485,7 @@ export class GameService {
     room.winnerId = null;
     room.usedWords.clear();
     room.usedWordsOrdered = [];
+    room.activeTurnTyping = this.createActiveTurnTypingState(null);
 
     for (const player of room.players) {
       player.score = 0;
@@ -469,14 +497,63 @@ export class GameService {
     room.updatedAt = Date.now();
 
     this.broadcastRoom(room);
+    this.emitTypingState(room);
 
     return { ok: true, state: this.serializeRoom(room) };
+  }
+
+  public handleTyping(socketId: string, payload: PlayerTypingPayload): void {
+    const now = Date.now();
+    if (!this.consumeTypingRateLimit(socketId, now)) {
+      return;
+    }
+
+    const roomCode = sanitizeRoomCode(payload?.roomCode ?? "");
+    const room = this.rooms.get(roomCode);
+    if (!room || room.phase !== "in_game") {
+      return;
+    }
+
+    const session = this.socketSessions.get(socketId);
+    if (!session || session.roomCode !== roomCode) {
+      return;
+    }
+
+    if (!room.activePlayerId || room.activePlayerId !== session.playerId) {
+      return;
+    }
+
+    const player = this.getPlayer(room, session.playerId);
+    if (!player || !player.connected || player.eliminated) {
+      return;
+    }
+
+    const preview = sanitizeTypingPreview(payload?.preview ?? "");
+    const activePlayerId = room.activePlayerId;
+    const hasChanged =
+      room.activeTurnTyping.playerId !== activePlayerId ||
+      !room.activeTurnTyping.isTyping ||
+      room.activeTurnTyping.preview !== preview;
+
+    if (!hasChanged) {
+      return;
+    }
+
+    room.activeTurnTyping = {
+      playerId: activePlayerId,
+      preview,
+      isTyping: true,
+      updatedAt: now,
+    };
+    room.updatedAt = now;
+    this.emitTypingState(room);
   }
 
   public handleDisconnect(socketId: string): void {
     const session = this.socketSessions.get(socketId);
     this.socketSessions.delete(socketId);
     this.lastSubmitAtBySocket.delete(socketId);
+    this.typingEventTimesBySocket.delete(socketId);
 
     if (!session) {
       return;
@@ -520,6 +597,7 @@ export class GameService {
     room.updatedAt = Date.now();
 
     this.broadcastRoom(room);
+    this.emitTypingState(room);
   }
 
   public toAck(result: OperationResult): AckResponse {
@@ -568,6 +646,7 @@ export class GameService {
       this.advanceTurn(room, room.activePlayerId);
       room.lastEvent = "Bomb moved because active player was unavailable.";
       room.updatedAt = Date.now();
+      this.emitTypingState(room);
       return;
     }
 
@@ -582,6 +661,7 @@ export class GameService {
 
     this.advanceTurn(room, active.id);
     room.updatedAt = Date.now();
+    this.emitTypingState(room);
   }
 
   private cleanupRooms(): void {
@@ -609,6 +689,7 @@ export class GameService {
     }
 
     room.activePlayerId = next.id;
+    this.resetActiveTurnTyping(room, next.id);
     room.previousChunk = room.currentChunk;
     room.currentChunk = this.chooseChunk(room, room.previousChunk);
     room.timerEndsAt = Date.now() + room.config.turnSeconds * 1000;
@@ -620,6 +701,7 @@ export class GameService {
     room.activePlayerId = null;
     room.currentChunk = null;
     room.timerEndsAt = null;
+    room.activeTurnTyping = this.createActiveTurnTypingState(null);
     room.updatedAt = Date.now();
 
     room.lastEvent = winner ? `${winner.name} wins the match.` : "Match ended.";
@@ -690,6 +772,34 @@ export class GameService {
     this.socketSessions.set(socketId, { roomCode, playerId });
   }
 
+  private createActiveTurnTypingState(playerId: string | null): RoomState["activeTurnTyping"] {
+    return {
+      playerId,
+      preview: "",
+      isTyping: false,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private resetActiveTurnTyping(room: RoomState, playerId: string | null): void {
+    room.activeTurnTyping = this.createActiveTurnTypingState(playerId);
+  }
+
+  private consumeTypingRateLimit(socketId: string, now: number): boolean {
+    const recentEvents = (this.typingEventTimesBySocket.get(socketId) ?? []).filter(
+      (timestamp) => now - timestamp < TYPING_RATE_LIMIT_WINDOW_MS,
+    );
+
+    if (recentEvents.length >= MAX_TYPING_EVENTS_PER_WINDOW) {
+      this.typingEventTimesBySocket.set(socketId, recentEvents);
+      return false;
+    }
+
+    recentEvents.push(now);
+    this.typingEventTimesBySocket.set(socketId, recentEvents);
+    return true;
+  }
+
   private socketOwnsPlayer(socketId: string, roomCode: string, playerId: string): boolean {
     const session = this.socketSessions.get(socketId);
     return !!session && session.roomCode === roomCode && session.playerId === playerId;
@@ -699,6 +809,10 @@ export class GameService {
     const snapshot = this.serializeRoom(room);
     this.io.to(room.code).emit("room:update", snapshot);
     this.io.to(room.code).emit("game:state", snapshot);
+  }
+
+  private emitTypingState(room: RoomState, target: string = room.code): void {
+    this.io.to(target).emit("room:typingState", this.serializeTypingState(room));
   }
 
   private serializeRoom(room: RoomState): PublicRoomState {
@@ -724,6 +838,7 @@ export class GameService {
         turnSeconds: room.config.turnSeconds,
         startingLives: room.config.startingLives,
         dictionaryEnabled: room.config.dictionaryEnabled,
+        showTypingPreviews: room.config.showTypingPreviews,
       },
       activePlayerId: room.activePlayerId,
       currentChunk: room.currentChunk,
@@ -733,6 +848,16 @@ export class GameService {
       lastEvent: room.lastEvent,
       canStart: room.phase === "lobby" && room.players.filter((player) => player.connected).length >= 2,
       serverTime: Date.now(),
+    };
+  }
+
+  private serializeTypingState(room: RoomState): PublicTypingState {
+    const canShowPreviewText = room.phase === "in_game" && room.config.showTypingPreviews;
+
+    return {
+      activePlayerId: room.activeTurnTyping.playerId ?? room.activePlayerId,
+      isTyping: room.activeTurnTyping.isTyping,
+      text: canShowPreviewText ? room.activeTurnTyping.preview : "",
     };
   }
 }

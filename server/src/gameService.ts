@@ -38,9 +38,12 @@ const TYPING_RATE_LIMIT_WINDOW_MS = 1000;
 const MAX_TYPING_EVENTS_PER_WINDOW = 8;
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000;
 const CHUNK_COOLDOWN_TURNS = 8;
-const VERY_HARD_INJECTION_CHANCE = 0.1;
-const WAVE_PERIOD_TURNS = 14;
-const DIFFICULTY_ORDER: ChunkTier[] = ["veryHard", "hard", "medium", "easy", "veryEasy"];
+const STAGE_TIER_ORDER: ChunkTier[] = ["veryEasy", "easy", "medium", "hard", "veryHard"];
+const POST_VERY_HARD_TIER_WEIGHTS: Array<{ tier: ChunkTier; weight: number }> = [
+  { tier: "medium", weight: 20 },
+  { tier: "hard", weight: 40 },
+  { tier: "veryHard", weight: 40 },
+];
 
 interface SocketSession {
   roomCode: string;
@@ -53,6 +56,11 @@ interface OperationResult {
   roomCode?: string;
   playerId?: string;
   state?: PublicRoomState;
+}
+
+interface DifficultyTarget {
+  stageIndex: number;
+  targetTier: ChunkTier;
 }
 
 export class GameService {
@@ -81,11 +89,13 @@ export class GameService {
     const host: PlayerState = {
       id: playerId,
       name,
+      role: "player",
       joinedAt: Date.now(),
       socketId,
       connected: true,
       score: 0,
       lastWord: "",
+      activeTurnCount: 0,
       lives: DEFAULT_STARTING_LIVES,
       eliminated: false,
     };
@@ -108,11 +118,13 @@ export class GameService {
       currentChunk: null,
       currentChunkCoverage: null,
       currentChunkTier: null,
-      difficultyScalar: null,
+      globalDifficultyTier: null,
+      globalStageIndex: 0,
       turnNumber: 0,
       turnDurationSeconds: 0,
       turnStartedAt: null,
       matchStartedAt: null,
+      activePlayerCountAtMatchStart: 0,
       recentChunks: [],
       randomState: 1,
       winnerId: null,
@@ -174,11 +186,13 @@ export class GameService {
     const player: PlayerState = {
       id: playerId,
       name,
+      role: "player",
       joinedAt: Date.now(),
       socketId,
       connected: true,
       score: 0,
       lastWord: "",
+      activeTurnCount: 0,
       lives: room.config.startingLives,
       eliminated: false,
     };
@@ -281,12 +295,14 @@ export class GameService {
       typeof payload.turnSeconds === "number" ||
       typeof payload.startingLives === "number" ||
       typeof payload.dictionaryEnabled === "boolean" ||
-      typeof payload.allowFourLetterChunks === "boolean";
+      typeof payload.allowFourLetterChunks === "boolean" ||
+      typeof payload.hostSpectatorMode === "boolean";
 
     if (hasLobbyOnlyUpdates && room.phase !== "lobby") {
       return {
         ok: false,
-        error: "Turn timer, lives, dictionary, and chunk pool settings can only be changed in lobby.",
+        error:
+          "Turn timer, lives, dictionary, chunk pool, and spectator mode can only be changed in lobby.",
       };
     }
 
@@ -314,8 +330,16 @@ export class GameService {
       room.config.allowFourLetterChunks = payload.allowFourLetterChunks;
     }
 
+    if (typeof payload.hostSpectatorMode === "boolean") {
+      this.setHostSpectatorMode(room, payload.hostSpectatorMode);
+      room.lastEvent = payload.hostSpectatorMode
+        ? "Host will spectate this match."
+        : "Host rejoined the player rotation.";
+    } else {
+      room.lastEvent = "Host updated game settings.";
+    }
+
     room.updatedAt = Date.now();
-    room.lastEvent = "Host updated game settings.";
 
     this.broadcastRoom(room);
     if (typeof payload.showTypingPreviews === "boolean") {
@@ -345,9 +369,9 @@ export class GameService {
       return { ok: false, error: "Game already running." };
     }
 
-    const connectedCount = room.players.filter((player) => player.connected).length;
-    if (connectedCount < MIN_PLAYERS_TO_START) {
-      return { ok: false, error: "Need at least 2 connected players to start." };
+    const connectedTurnPlayers = this.getConnectedTurnPlayers(room);
+    if (connectedTurnPlayers.length < MIN_PLAYERS_TO_START) {
+      return { ok: false, error: "Need at least 2 connected players in the turn rotation to start." };
     }
 
     room.phase = "in_game";
@@ -358,11 +382,13 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
-    room.difficultyScalar = null;
+    room.globalDifficultyTier = null;
+    room.globalStageIndex = 0;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
     room.matchStartedAt = Date.now();
+    room.activePlayerCountAtMatchStart = connectedTurnPlayers.length;
     room.recentChunks = [];
     room.randomState = createSeededRandomState(`${room.code}:${room.matchStartedAt}`);
     room.activeTurnTyping = this.createActiveTurnTypingState(null);
@@ -370,19 +396,23 @@ export class GameService {
     for (const player of room.players) {
       player.score = 0;
       player.lastWord = "";
-      player.lives = room.config.startingLives;
+      player.activeTurnCount = 0;
+      player.lives = player.role === "player" ? room.config.startingLives : 0;
       player.eliminated = false;
     }
 
     const firstActive = this.getNextEligiblePlayer(room, null);
     if (!firstActive) {
       room.phase = "lobby";
+      room.matchStartedAt = null;
+      room.activePlayerCountAtMatchStart = 0;
       return { ok: false, error: "No eligible players to start the game." };
     }
 
     if (!this.beginTurn(room, firstActive.id, 1)) {
       room.phase = "lobby";
       room.matchStartedAt = null;
+      room.activePlayerCountAtMatchStart = 0;
       room.randomState = 1;
       return { ok: false, error: "Could not create a chunk pool for this match." };
     }
@@ -420,8 +450,16 @@ export class GameService {
     }
 
     const player = this.getPlayer(room, payload.playerId);
-    if (!player || !player.connected || player.eliminated) {
+    if (!player || !player.connected) {
       return { ok: false, error: "You are not an active player." };
+    }
+
+    if (player.role !== "player") {
+      return { ok: false, error: "Spectators cannot submit words." };
+    }
+
+    if (player.eliminated) {
+      return { ok: false, error: "You are out for this match." };
     }
 
     if (room.activePlayerId !== player.id) {
@@ -490,11 +528,13 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
-    room.difficultyScalar = null;
+    room.globalDifficultyTier = null;
+    room.globalStageIndex = 0;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
     room.matchStartedAt = null;
+    room.activePlayerCountAtMatchStart = 0;
     room.recentChunks = [];
     room.randomState = 1;
     room.winnerId = null;
@@ -505,7 +545,8 @@ export class GameService {
     for (const player of room.players) {
       player.score = 0;
       player.lastWord = "";
-      player.lives = room.config.startingLives;
+      player.activeTurnCount = 0;
+      player.lives = player.role === "player" ? room.config.startingLives : 0;
       player.eliminated = false;
     }
 
@@ -540,7 +581,7 @@ export class GameService {
     }
 
     const player = this.getPlayer(room, session.playerId);
-    if (!player || !player.connected || player.eliminated) {
+    if (!player || !player.connected || player.role !== "player" || player.eliminated) {
       return;
     }
 
@@ -656,7 +697,7 @@ export class GameService {
 
     const active = this.getPlayer(room, room.activePlayerId);
 
-    if (!active || !active.connected || active.eliminated) {
+    if (!active || !active.connected || active.role !== "player" || active.eliminated) {
       this.advanceTurn(room, room.activePlayerId);
       if (room.phase === "in_game") {
         room.lastEvent = "Bomb moved because active player was unavailable.";
@@ -720,11 +761,13 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
-    room.difficultyScalar = null;
+    room.globalDifficultyTier = null;
+    room.globalStageIndex = 0;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
     room.matchStartedAt = null;
+    room.activePlayerCountAtMatchStart = 0;
     room.recentChunks = [];
     room.randomState = 1;
     room.activeTurnTyping = this.createActiveTurnTypingState(null);
@@ -734,16 +777,29 @@ export class GameService {
   }
 
   private beginTurn(room: RoomState, activePlayerId: string, turnNumber: number): boolean {
-    const selectedChunk = this.selectNextChunk(room, turnNumber);
+    const activePlayer = this.getPlayer(room, activePlayerId);
+    if (!activePlayer || activePlayer.role !== "player") {
+      return false;
+    }
+
+    const chunkPool = this.getChunkPool(room);
+    if (chunkPool.poolSize === 0) {
+      return false;
+    }
+
+    const difficultyTarget = this.getDifficultyTarget(room, activePlayer.id, chunkPool);
+    const selectedChunk = this.selectNextChunk(room, chunkPool, difficultyTarget.targetTier);
     if (!selectedChunk) {
       return false;
     }
 
+    activePlayer.activeTurnCount += 1;
     room.activePlayerId = activePlayerId;
     room.currentChunk = selectedChunk.chunk;
     room.currentChunkCoverage = selectedChunk.coverage;
     room.currentChunkTier = selectedChunk.tier;
-    room.difficultyScalar = this.getDifficultyScalar(turnNumber);
+    room.globalDifficultyTier = difficultyTarget.targetTier;
+    room.globalStageIndex = difficultyTarget.stageIndex;
     room.turnNumber = turnNumber;
     room.turnDurationSeconds = this.computeTurnDurationSeconds(room, turnNumber);
     room.turnStartedAt = Date.now();
@@ -753,38 +809,48 @@ export class GameService {
     return true;
   }
 
-  private selectNextChunk(room: RoomState, turnNumber: number): ChunkDescriptor | null {
-    const chunkPool = this.getChunkPool(room);
-    if (chunkPool.poolSize === 0) {
-      return null;
-    }
-
-    const forceVeryHard =
-      this.nextRandom(room) < VERY_HARD_INJECTION_CHANCE &&
-      chunkPool.tierChunks.veryHard.length > 0;
-    const primaryTier = forceVeryHard
-      ? "veryHard"
-      : this.pickWeightedTier(room, chunkPool, turnNumber);
-
-    const tiersToTry = [primaryTier, ...this.getFallbackTierOrder(primaryTier)];
-
-    for (const tier of tiersToTry) {
-      const descriptor = this.pickChunkFromTier(room, chunkPool, tier);
-      if (descriptor) {
-        return descriptor;
+  private getDifficultyTarget(
+    room: RoomState,
+    incomingActivePlayerId: string,
+    chunkPool: ChunkPool,
+  ): DifficultyTarget {
+    const divisor = Math.max(
+      1,
+      room.activePlayerCountAtMatchStart || this.getPlayersInRotation(room).length,
+    );
+    const totalActiveTurns = room.players.reduce((sum, player) => {
+      if (player.role !== "player") {
+        return sum;
       }
+
+      return sum + player.activeTurnCount + (player.id === incomingActivePlayerId ? 1 : 0);
+    }, 0);
+
+    const stageIndex = Math.min(
+      STAGE_TIER_ORDER.length - 1,
+      Math.floor(totalActiveTurns / (2 * divisor)),
+    );
+
+    if (stageIndex < STAGE_TIER_ORDER.length - 1) {
+      return {
+        stageIndex,
+        targetTier: STAGE_TIER_ORDER[stageIndex],
+      };
     }
 
-    return this.pickChunkFromPool(room, chunkPool);
+    return {
+      stageIndex,
+      targetTier: this.pickPostVeryHardTier(room, chunkPool),
+    };
   }
 
-  private pickWeightedTier(room: RoomState, chunkPool: ChunkPool, turnNumber: number): ChunkTier {
-    const weightedTiers = this.getTierWeightsForScalar(this.getDifficultyScalar(turnNumber)).filter(
-      (entry) => entry.weight > 0 && chunkPool.tierChunks[entry.tier].length > 0,
+  private pickPostVeryHardTier(room: RoomState, chunkPool: ChunkPool): ChunkTier {
+    const weightedTiers = POST_VERY_HARD_TIER_WEIGHTS.filter(
+      (entry) => chunkPool.tierChunks[entry.tier].length > 0,
     );
 
     if (weightedTiers.length === 0) {
-      const fallbackTier = DIFFICULTY_ORDER.find((tier) => chunkPool.tierChunks[tier].length > 0);
+      const fallbackTier = STAGE_TIER_ORDER.find((tier) => chunkPool.tierChunks[tier].length > 0);
       return fallbackTier ?? "medium";
     }
 
@@ -802,69 +868,37 @@ export class GameService {
     return weightedTiers[weightedTiers.length - 1].tier;
   }
 
-  private getDifficultyScalar(turnNumber: number): number {
-    const phase = (2 * Math.PI * (turnNumber - 1)) / WAVE_PERIOD_TURNS;
-    return (Math.sin(phase) + 1) / 2;
-  }
+  private selectNextChunk(
+    room: RoomState,
+    chunkPool: ChunkPool,
+    targetTier: ChunkTier,
+  ): ChunkDescriptor | null {
+    const tiersToTry = [targetTier, ...this.getFallbackTierOrder(targetTier)];
 
-  private getTierWeightsForScalar(
-    difficultyScalar: number,
-  ): Array<{ tier: ChunkTier; weight: number }> {
-    if (difficultyScalar < 0.2) {
-      return [
-        { tier: "veryEasy", weight: 55 },
-        { tier: "easy", weight: 35 },
-        { tier: "medium", weight: 10 },
-      ];
+    for (const tier of tiersToTry) {
+      const descriptor = this.pickChunkFromTier(room, chunkPool, tier);
+      if (descriptor) {
+        return descriptor;
+      }
     }
 
-    if (difficultyScalar < 0.45) {
-      return [
-        { tier: "veryEasy", weight: 10 },
-        { tier: "easy", weight: 50 },
-        { tier: "medium", weight: 45 },
-        { tier: "hard", weight: 15 },
-      ];
-    }
-
-    if (difficultyScalar < 0.65) {
-      return [
-        { tier: "easy", weight: 10 },
-        { tier: "medium", weight: 50 },
-        { tier: "hard", weight: 35 },
-        { tier: "veryHard", weight: 5 },
-      ];
-    }
-
-    if (difficultyScalar < 0.85) {
-      return [
-        { tier: "medium", weight: 15 },
-        { tier: "hard", weight: 50 },
-        { tier: "veryHard", weight: 35 },
-      ];
-    }
-
-    return [
-      { tier: "medium", weight: 10 },
-      { tier: "hard", weight: 35 },
-      { tier: "veryHard", weight: 55 },
-    ];
+    return this.pickChunkFromPool(room, chunkPool);
   }
 
   private getFallbackTierOrder(primaryTier: ChunkTier): ChunkTier[] {
-    const primaryIndex = DIFFICULTY_ORDER.indexOf(primaryTier);
+    const primaryIndex = STAGE_TIER_ORDER.indexOf(primaryTier);
 
-    return DIFFICULTY_ORDER
+    return STAGE_TIER_ORDER
       .filter((tier) => tier !== primaryTier)
       .sort((left, right) => {
-        const leftDistance = Math.abs(DIFFICULTY_ORDER.indexOf(left) - primaryIndex);
-        const rightDistance = Math.abs(DIFFICULTY_ORDER.indexOf(right) - primaryIndex);
+        const leftDistance = Math.abs(STAGE_TIER_ORDER.indexOf(left) - primaryIndex);
+        const rightDistance = Math.abs(STAGE_TIER_ORDER.indexOf(right) - primaryIndex);
 
         if (leftDistance !== rightDistance) {
           return leftDistance - rightDistance;
         }
 
-        return DIFFICULTY_ORDER.indexOf(left) - DIFFICULTY_ORDER.indexOf(right);
+        return STAGE_TIER_ORDER.indexOf(left) - STAGE_TIER_ORDER.indexOf(right);
       });
   }
 
@@ -888,7 +922,7 @@ export class GameService {
   }
 
   private pickChunkFromPool(room: RoomState, chunkPool: ChunkPool): ChunkDescriptor | null {
-    const allChunks = DIFFICULTY_ORDER.flatMap((tier) => chunkPool.tierChunks[tier]);
+    const allChunks = STAGE_TIER_ORDER.flatMap((tier) => chunkPool.tierChunks[tier]);
     const availableChunks = this.filterChunksByCooldown(allChunks, room.recentChunks);
 
     if (availableChunks.length === 0) {
@@ -949,8 +983,18 @@ export class GameService {
     return next.value;
   }
 
+  private getPlayersInRotation(room: RoomState): PlayerState[] {
+    return room.players.filter((player) => player.role === "player");
+  }
+
+  private getConnectedTurnPlayers(room: RoomState): PlayerState[] {
+    return room.players.filter((player) => player.role === "player" && player.connected);
+  }
+
   private getEligiblePlayers(room: RoomState): PlayerState[] {
-    return room.players.filter((player) => player.connected && !player.eliminated);
+    return room.players.filter(
+      (player) => player.role === "player" && player.connected && !player.eliminated,
+    );
   }
 
   private getNextEligiblePlayer(room: RoomState, fromPlayerId: string | null): PlayerState | null {
@@ -971,7 +1015,7 @@ export class GameService {
     for (let offset = 1; offset <= room.players.length; offset += 1) {
       const index = (startIndex + offset) % room.players.length;
       const candidate = room.players[index];
-      if (candidate.connected && !candidate.eliminated) {
+      if (candidate.role === "player" && candidate.connected && !candidate.eliminated) {
         return candidate;
       }
     }
@@ -989,11 +1033,25 @@ export class GameService {
       return;
     }
 
-    const nextHost = room.players.find((player) => player.connected);
+    const nextHost =
+      room.players.find((player) => player.connected && player.role === "player") ??
+      room.players.find((player) => player.connected);
     if (nextHost) {
       room.hostId = nextHost.id;
       room.lastEvent = `${nextHost.name} is now host.`;
     }
+  }
+
+  private setHostSpectatorMode(room: RoomState, enabled: boolean): void {
+    const host = this.getPlayer(room, room.hostId);
+    if (!host) {
+      return;
+    }
+
+    host.role = enabled ? "spectator" : "player";
+    host.eliminated = false;
+    host.lastWord = enabled ? "" : host.lastWord;
+    host.lives = enabled ? 0 : room.config.startingLives;
   }
 
   private bindSocketSession(socketId: string, roomCode: string, playerId: string): void {
@@ -1056,9 +1114,11 @@ export class GameService {
       players: room.players.map((player) => ({
         id: player.id,
         name: player.name,
+        role: player.role,
         connected: player.connected,
         score: player.score,
         lastWord: player.lastWord,
+        activeTurnCount: player.activeTurnCount,
         lives: player.lives,
         eliminated: player.eliminated,
         joinedAt: player.joinedAt,
@@ -1074,14 +1134,15 @@ export class GameService {
       currentChunk: room.currentChunk,
       currentChunkCoverage: room.currentChunkCoverage,
       currentChunkTier: room.currentChunkTier,
-      difficultyScalar: room.difficultyScalar,
+      globalDifficultyTier: room.globalDifficultyTier,
+      globalStageIndex: room.globalStageIndex,
       turnNumber: room.turnNumber,
       turnDurationSeconds: room.turnDurationSeconds,
       remainingMs,
       usedWords: room.usedWordsOrdered.map((word) => word.toLowerCase()),
       winnerId: room.winnerId,
       lastEvent: room.lastEvent,
-      canStart: room.phase === "lobby" && room.players.filter((player) => player.connected).length >= 2,
+      canStart: room.phase === "lobby" && this.getConnectedTurnPlayers(room).length >= MIN_PLAYERS_TO_START,
       serverTime: Date.now(),
     };
   }

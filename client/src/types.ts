@@ -1,5 +1,6 @@
 export type GamePhase = "lobby" | "in_game" | "results";
 export type ChunkTier = "veryEasy" | "easy" | "medium" | "hard" | "veryHard";
+export type PlayerRole = "player" | "spectator";
 
 export interface RoomConfig {
   turnSeconds: number;
@@ -12,9 +13,11 @@ export interface RoomConfig {
 export interface PublicPlayerState {
   id: string;
   name: string;
+  role: PlayerRole;
   connected: boolean;
   score: number;
   lastWord: string;
+  activeTurnCount: number;
   lives: number;
   eliminated: boolean;
   joinedAt: number;
@@ -30,7 +33,8 @@ export interface PublicRoomState {
   currentChunk: string | null;
   currentChunkCoverage: number | null;
   currentChunkTier: ChunkTier | null;
-  difficultyScalar: number | null;
+  globalDifficultyTier: ChunkTier | null;
+  globalStageIndex: number;
   turnNumber: number;
   turnDurationSeconds: number;
   remainingMs: number;

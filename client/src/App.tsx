@@ -1,4 +1,5 @@
 import { FormEvent, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import QRCode from "qrcode";
 import { socket } from "./socket";
 import {
   AckResponse,
@@ -11,6 +12,11 @@ import {
 } from "./types";
 
 const SESSION_KEY = "word-fuse-session";
+type RoomSettingsUpdate = Partial<RoomConfig> & { hostSpectatorMode?: boolean };
+
+function sanitizeRoomCodeInput(input: string): string {
+  return input.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+}
 
 function loadStoredSession(): Session | null {
   const raw = localStorage.getItem(SESSION_KEY);
@@ -55,6 +61,9 @@ function statusLabel(status: ConnectionStatus): string {
 
 function sortedScoreboard(players: PublicPlayerState[]): PublicPlayerState[] {
   return [...players].sort((a, b) => {
+    if (a.role !== b.role) {
+      return a.role === "player" ? -1 : 1;
+    }
     if (b.score !== a.score) {
       return b.score - a.score;
     }
@@ -102,6 +111,17 @@ const TIER_LABELS: Record<ChunkTier, string> = {
 
 function formatCoverageK(value: number | null): string {
   return `${Math.round((value ?? 0) / 1000)}k`;
+}
+
+function loadJoinCodeFromUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  return sanitizeRoomCodeInput(params.get("room") ?? "");
+}
+
+function buildJoinUrl(roomCode: string): string {
+  const url = new URL(window.location.origin);
+  url.searchParams.set("room", roomCode);
+  return url.toString();
 }
 
 const MIN_ERROR_DISPLAY_MS = 3000;
@@ -152,7 +172,7 @@ function HomeView(props: HomeViewProps): JSX.Element {
             Room Code
             <input
               value={props.joinCode}
-              onChange={(event) => props.onJoinCode(event.target.value.toUpperCase())}
+              onChange={(event) => props.onJoinCode(sanitizeRoomCodeInput(event.target.value))}
               maxLength={6}
               placeholder="ABC123"
               required
@@ -175,16 +195,94 @@ function HomeView(props: HomeViewProps): JSX.Element {
   );
 }
 
+interface JoinLinkCardProps {
+  roomCode: string;
+}
+
+function JoinLinkCard(props: JoinLinkCardProps): JSX.Element {
+  const joinUrl = useMemo(() => buildJoinUrl(props.roomCode), [props.roomCode]);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState("");
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    QRCode.toDataURL(joinUrl, { margin: 1, width: 220 })
+      .then((dataUrl: string) => {
+        if (!cancelled) {
+          setQrCodeDataUrl(dataUrl);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setQrCodeDataUrl("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [joinUrl]);
+
+  useEffect(() => {
+    if (copyState === "idle") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCopyState("idle");
+    }, 2000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [copyState]);
+
+  const handleCopyLink = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(joinUrl);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  return (
+    <div className="join-panel">
+      <div className="qr-card">
+        {qrCodeDataUrl ? <img src={qrCodeDataUrl} alt={`QR code to join room ${props.roomCode}`} /> : null}
+      </div>
+      <div className="join-panel-copy">
+        <div className="join-link-label">Join Link</div>
+        <div className="join-link">{joinUrl}</div>
+        <button type="button" className="secondary" onClick={handleCopyLink}>
+          Copy Join Link
+        </button>
+        <div className="small-note">
+          {copyState === "copied"
+            ? "Join link copied."
+            : copyState === "error"
+              ? "Could not copy link."
+              : "Scan on another device to prefill the room code."}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface LobbyViewProps {
   session: Session;
   roomState: PublicRoomState;
   isHost: boolean;
   onStart: () => void;
-  onUpdateSettings: (settings: Partial<RoomConfig>) => void;
+  onUpdateSettings: (settings: RoomSettingsUpdate) => void;
   onLeave: () => void;
 }
 
 function LobbyView(props: LobbyViewProps): JSX.Element {
+  const hostPlayer = props.roomState.players.find((player) => player.id === props.roomState.hostId) ?? null;
+  const hostIsSpectating = hostPlayer?.role === "spectator";
+
   return (
     <section className="view-card">
       <div className="header-row">
@@ -196,6 +294,9 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
 
       <div className="panel-group">
         <div className="panel">
+          <h3>Invite</h3>
+          <JoinLinkCard roomCode={props.roomState.roomCode} />
+
           <h3>Players</h3>
           <ul className="player-list">
             {props.roomState.players.map((player) => (
@@ -204,6 +305,7 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
                   <span className="player-name">{player.name}</span>
                   {player.id === props.session.playerId ? <span className="tag">You</span> : null}
                   {player.id === props.roomState.hostId ? <span className="tag host">Host</span> : null}
+                  {player.role === "spectator" ? <span className="tag spectator">Spectator</span> : null}
                 </div>
                 <span className={player.connected ? "status online" : "status offline"}>
                   {player.connected ? "Online" : "Offline"}
@@ -280,9 +382,25 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
             Show live typing previews
           </label>
 
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={hostIsSpectating}
+              disabled={!props.isHost}
+              onChange={(event) =>
+                props.onUpdateSettings({ hostSpectatorMode: event.target.checked })
+              }
+            />
+            Host spectator mode
+          </label>
+
           <p className="small-note">
-            Chunk pool defaults to familiar 2-3 letter groups. Turn time drops by 1s every 3 turns,
-            never below 5s.
+            Chunk pool defaults to familiar 2-3 letter groups. Difficulty steps up after every
+            two active turns per player, then hovers across Medium, Hard, and Very Hard.
+          </p>
+
+          <p className="small-note">
+            Need at least two connected players in the turn rotation to start. Spectators do not count.
           </p>
 
           {props.isHost ? (
@@ -346,12 +464,16 @@ interface TurnOrderRowProps {
 }
 
 function TurnOrderRow(props: TurnOrderRowProps): JSX.Element {
+  let turnOrderIndex = 0;
+
   return (
     <div className="turn-row" role="list" aria-label="Turn order">
-      {props.roomState.players.map((player, index) => {
+      {props.roomState.players.map((player) => {
         const isActive = player.id === props.roomState.activePlayerId;
         const isLocalPlayer = player.id === props.session.playerId;
-        const isEliminated = player.eliminated || player.lives <= 0;
+        const isSpectator = player.role === "spectator";
+        const isEliminated = !isSpectator && (player.eliminated || player.lives <= 0);
+        const displayedTurnIndex = !isSpectator ? ++turnOrderIndex : null;
 
         return (
           <div
@@ -360,6 +482,7 @@ function TurnOrderRow(props: TurnOrderRowProps): JSX.Element {
               "turn-chip",
               isActive ? "active" : "",
               isLocalPlayer ? "you" : "",
+              isSpectator ? "spectator" : "",
               isEliminated ? "eliminated" : "",
             ]
               .filter(Boolean)
@@ -369,14 +492,18 @@ function TurnOrderRow(props: TurnOrderRowProps): JSX.Element {
             <div className="turn-chip-main">
               {isActive ? (
                 <TurnMarkerIcon />
+              ) : isSpectator ? (
+                <span className="turn-chip-flag spectator">Spectator</span>
               ) : (
-                <span className="turn-chip-order">{index + 1}</span>
+                <span className="turn-chip-order">{displayedTurnIndex}</span>
               )}
               <span className="turn-chip-name">{player.name}</span>
               {isActive ? <span className="turn-chip-counter">#{props.roomState.turnNumber}</span> : null}
             </div>
             <div className="turn-chip-meta">
-              {isEliminated ? (
+              {isSpectator ? (
+                <span className="turn-chip-last subtle">Room host controls only</span>
+              ) : isEliminated ? (
                 <span className="turn-chip-flag out">OUT</span>
               ) : player.lastWord ? (
                 <span className="turn-chip-last">{player.lastWord}</span>
@@ -431,7 +558,8 @@ function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
 
       <div className="scoreboard-list">
         {sortedScoreboard(props.roomState.players).map((player) => {
-          const isEliminated = player.eliminated || player.lives <= 0;
+          const isSpectator = player.role === "spectator";
+          const isEliminated = !isSpectator && (player.eliminated || player.lives <= 0);
 
           return (
             <div
@@ -439,6 +567,7 @@ function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
               className={[
                 "scoreboard-grid",
                 "scoreboard-row",
+                isSpectator ? "spectator" : "",
                 isEliminated ? "eliminated" : "",
               ]
                 .filter(Boolean)
@@ -448,10 +577,13 @@ function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
                 <span className="player-name">{player.name}</span>
                 {player.id === props.session.playerId ? <span className="tag">You</span> : null}
                 {player.id === props.roomState.activePlayerId ? <span className="tag active">Turn</span> : null}
+                {isSpectator ? <span className="tag spectator">Spectator</span> : null}
                 {isEliminated ? <span className="tag eliminated">OUT</span> : null}
               </div>
-              <div className="scoreboard-word">{player.lastWord || "--"}</div>
-              <div className="scoreboard-lives">{player.lives}</div>
+              <div className={isSpectator ? "scoreboard-word spectator" : "scoreboard-word"}>
+                {isSpectator ? "Host controls only" : player.lastWord || "--"}
+              </div>
+              <div className="scoreboard-lives">{isSpectator ? "--" : player.lives}</div>
             </div>
           );
         })}
@@ -491,6 +623,9 @@ function GameView(props: GameViewProps): JSX.Element {
   const typingPreviewText = props.roomState.config.showTypingPreviews
     ? props.typingState.text || "..."
     : "typing...";
+  const targetDifficultyLabel = props.roomState.globalDifficultyTier
+    ? TIER_LABELS[props.roomState.globalDifficultyTier]
+    : null;
 
   return (
     <section className="view-card">
@@ -501,7 +636,7 @@ function GameView(props: GameViewProps): JSX.Element {
 
       <TurnOrderRow roomState={props.roomState} session={props.session} />
 
-      {props.localPlayer?.eliminated ? (
+      {props.localPlayer?.role === "player" && props.localPlayer.eliminated ? (
         <div className="player-state-banner out-banner" role="status" aria-live="polite">
           You Are Out
         </div>
@@ -544,8 +679,11 @@ function GameView(props: GameViewProps): JSX.Element {
           <span className="turn-pill">
             {props.roomState.config.allowFourLetterChunks ? "2-4 letters" : "2-3 letters"}
           </span>
-          {props.roomState.difficultyScalar !== null ? (
-            <span className="turn-pill">Wave {Math.round(props.roomState.difficultyScalar * 100)}%</span>
+          {targetDifficultyLabel ? (
+            <span className="turn-pill">Target {targetDifficultyLabel}</span>
+          ) : null}
+          {props.roomState.globalStageIndex > 0 ? (
+            <span className="turn-pill">Stage {props.roomState.globalStageIndex + 1}</span>
           ) : null}
         </div>
       </div>
@@ -654,7 +792,7 @@ export default function App(): JSX.Element {
   const [typingState, setTypingState] = useState<TypingState>(() => createBlankTypingState());
   const [createName, setCreateName] = useState("");
   const [joinName, setJoinName] = useState("");
-  const [joinCode, setJoinCode] = useState("");
+  const [joinCode, setJoinCode] = useState(() => loadJoinCodeFromUrl());
   const [wordDraft, setWordDraft] = useState("");
   const [error, setError] = useState("");
   const wordInputRef = useRef<HTMLInputElement>(null);
@@ -890,6 +1028,7 @@ export default function App(): JSX.Element {
     roomState.phase === "in_game" &&
     roomState.activePlayerId === session.playerId &&
     connectionStatus === "connected" &&
+    me?.role === "player" &&
     !me?.eliminated;
 
   useEffect(() => {
@@ -983,7 +1122,7 @@ export default function App(): JSX.Element {
     );
   };
 
-  const handleUpdateSettings = (settings: Partial<RoomConfig>): void => {
+  const handleUpdateSettings = (settings: RoomSettingsUpdate): void => {
     if (!session || !roomState) {
       return;
     }

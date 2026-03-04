@@ -26,6 +26,7 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
   - Starting lives: 1-5
   - Dictionary validation on/off
   - Optional 4-letter chunk pool expansion
+  - Host spectator mode on/off
   - Live typing previews on/off
 - Server-authoritative gameplay:
   - Active player must submit an unused alphabetic word (>=3 letters)
@@ -45,10 +46,14 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
   - Auto-bands tiers from coverage percentiles: 0-10, 10-30, 30-60, 60-85, and 85-100
   - Keeps an 8-turn chunk cooldown, with no immediate repeats
 - Match tension and chunk metadata:
-  - Chunk preference now oscillates on a 14-turn sine-wave, where `0` means easier-tier bias and `1` means harder-tier bias
-  - Independent 10% very-hard injection stays inside the eligible pool
+  - Difficulty now advances in shared stages after every 2 active turns per player across the match roster
+  - After the match reaches `Very Hard`, each new turn hovers across `Medium` (20%), `Hard` (40%), and `Very Hard` (40%)
   - Turn duration decays by 1 second every 3 turns from the host's initial timer, never below 5 seconds
   - UI shows chunk subscript metadata as `<Difficulty> | <Nk>`
+- Spectator host mode and join tools:
+  - The host can spectate without entering the turn rotation, holding the bomb, or using lives
+  - Spectators are marked in lobby, turn row, and scoreboard UI
+  - The lobby renders a QR code and copyable join link in the format `https://<host>/?room=ROOMCODE`
 - Active-turn live typing feedback:
   - Only the active player's preview is shared with the room
   - Preview text persists for the full active turn once typing starts
@@ -215,6 +220,9 @@ If sockets fail in production, re-check:
 - Dictionary never calls external APIs at runtime. It uses local assets plus the bundled `word-list` npm package.
 - Chunk selection uses an 8-turn cooldown queue. If a tier runs dry under cooldown, the oldest chunk in the cooldown window is relaxed first, but immediate repeats remain disallowed.
 - Difficulty tiers are computed from coverage percentiles on the final eligible chunk pool after filtering and any cap/downselection.
-- Difficulty preference follows a repeating sine wave with a 14-turn period, so chunk pressure rises and falls instead of only getting harder.
+- Global difficulty stage is based on active-turn counts: every time the full player rotation collectively takes 2 turns each, the target tier advances by one step.
+- Once the stage reaches `Very Hard`, target-tier selection stays inside `Medium`, `Hard`, and `Very Hard` with weighted randomness instead of pinning to the hardest tier forever.
+- Host spectator mode removes the host from turn order while preserving room-control permissions.
+- QR join links use the current site origin with a `room` query string, which prefills the join form when opened on another device.
 - Turn time shown in the UI is the current turn's authoritative duration, not just the host's initial timer slider value.
 - The client now animates the visible countdown locally between authoritative turn changes, which keeps the timer responsive without rebroadcasting the full room state every tick.

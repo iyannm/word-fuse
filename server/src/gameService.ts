@@ -39,6 +39,7 @@ const MAX_TYPING_EVENTS_PER_WINDOW = 8;
 const EMPTY_ROOM_TTL_MS = 5 * 60 * 1000;
 const CHUNK_COOLDOWN_TURNS = 8;
 const VERY_HARD_INJECTION_CHANCE = 0.1;
+const WAVE_PERIOD_TURNS = 14;
 const DIFFICULTY_ORDER: ChunkTier[] = ["veryHard", "hard", "medium", "easy", "veryEasy"];
 
 interface SocketSession {
@@ -84,6 +85,7 @@ export class GameService {
       socketId,
       connected: true,
       score: 0,
+      lastWord: "",
       lives: DEFAULT_STARTING_LIVES,
       eliminated: false,
     };
@@ -106,6 +108,7 @@ export class GameService {
       currentChunk: null,
       currentChunkCoverage: null,
       currentChunkTier: null,
+      difficultyScalar: null,
       turnNumber: 0,
       turnDurationSeconds: 0,
       turnStartedAt: null,
@@ -175,6 +178,7 @@ export class GameService {
       socketId,
       connected: true,
       score: 0,
+      lastWord: "",
       lives: room.config.startingLives,
       eliminated: false,
     };
@@ -354,6 +358,7 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
+    room.difficultyScalar = null;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
@@ -364,6 +369,7 @@ export class GameService {
 
     for (const player of room.players) {
       player.score = 0;
+      player.lastWord = "";
       player.lives = room.config.startingLives;
       player.eliminated = false;
     }
@@ -447,6 +453,7 @@ export class GameService {
     room.usedWords.add(word);
     room.usedWordsOrdered.push(word);
     player.score += 1;
+    player.lastWord = word.toUpperCase();
     room.lastEvent = `${player.name} played "${word}".`;
 
     this.advanceTurn(room, player.id);
@@ -483,6 +490,7 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
+    room.difficultyScalar = null;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
@@ -496,6 +504,7 @@ export class GameService {
 
     for (const player of room.players) {
       player.score = 0;
+      player.lastWord = "";
       player.lives = room.config.startingLives;
       player.eliminated = false;
     }
@@ -637,8 +646,6 @@ export class GameService {
       if (now >= this.getTurnEndsAt(room)) {
         this.handleTimerExpiry(room);
       }
-
-      this.broadcastRoom(room);
     }
   }
 
@@ -651,8 +658,11 @@ export class GameService {
 
     if (!active || !active.connected || active.eliminated) {
       this.advanceTurn(room, room.activePlayerId);
-      room.lastEvent = "Bomb moved because active player was unavailable.";
+      if (room.phase === "in_game") {
+        room.lastEvent = "Bomb moved because active player was unavailable.";
+      }
       room.updatedAt = Date.now();
+      this.broadcastRoom(room);
       this.emitTypingState(room);
       return;
     }
@@ -660,6 +670,7 @@ export class GameService {
     active.lives = Math.max(0, active.lives - 1);
 
     if (active.lives === 0) {
+      active.lives = 0;
       active.eliminated = true;
       room.lastEvent = `${active.name} exploded and was eliminated.`;
     } else {
@@ -668,6 +679,7 @@ export class GameService {
 
     this.advanceTurn(room, active.id);
     room.updatedAt = Date.now();
+    this.broadcastRoom(room);
     this.emitTypingState(room);
   }
 
@@ -708,6 +720,7 @@ export class GameService {
     room.currentChunk = null;
     room.currentChunkCoverage = null;
     room.currentChunkTier = null;
+    room.difficultyScalar = null;
     room.turnNumber = 0;
     room.turnDurationSeconds = 0;
     room.turnStartedAt = null;
@@ -730,6 +743,7 @@ export class GameService {
     room.currentChunk = selectedChunk.chunk;
     room.currentChunkCoverage = selectedChunk.coverage;
     room.currentChunkTier = selectedChunk.tier;
+    room.difficultyScalar = this.getDifficultyScalar(turnNumber);
     room.turnNumber = turnNumber;
     room.turnDurationSeconds = this.computeTurnDurationSeconds(room, turnNumber);
     room.turnStartedAt = Date.now();
@@ -765,7 +779,7 @@ export class GameService {
   }
 
   private pickWeightedTier(room: RoomState, chunkPool: ChunkPool, turnNumber: number): ChunkTier {
-    const weightedTiers = this.getTierWeightsForTurn(turnNumber).filter(
+    const weightedTiers = this.getTierWeightsForScalar(this.getDifficultyScalar(turnNumber)).filter(
       (entry) => entry.weight > 0 && chunkPool.tierChunks[entry.tier].length > 0,
     );
 
@@ -788,27 +802,52 @@ export class GameService {
     return weightedTiers[weightedTiers.length - 1].tier;
   }
 
-  private getTierWeightsForTurn(turnNumber: number): Array<{ tier: ChunkTier; weight: number }> {
-    if (turnNumber <= 5) {
+  private getDifficultyScalar(turnNumber: number): number {
+    const phase = (2 * Math.PI * (turnNumber - 1)) / WAVE_PERIOD_TURNS;
+    return (Math.sin(phase) + 1) / 2;
+  }
+
+  private getTierWeightsForScalar(
+    difficultyScalar: number,
+  ): Array<{ tier: ChunkTier; weight: number }> {
+    if (difficultyScalar < 0.2) {
       return [
-        { tier: "easy", weight: 55 },
-        { tier: "medium", weight: 40 },
-        { tier: "hard", weight: 5 },
+        { tier: "veryEasy", weight: 55 },
+        { tier: "easy", weight: 35 },
+        { tier: "medium", weight: 10 },
       ];
     }
 
-    if (turnNumber <= 15) {
+    if (difficultyScalar < 0.45) {
       return [
+        { tier: "veryEasy", weight: 10 },
+        { tier: "easy", weight: 50 },
         { tier: "medium", weight: 45 },
-        { tier: "hard", weight: 45 },
-        { tier: "veryHard", weight: 10 },
+        { tier: "hard", weight: 15 },
+      ];
+    }
+
+    if (difficultyScalar < 0.65) {
+      return [
+        { tier: "easy", weight: 10 },
+        { tier: "medium", weight: 50 },
+        { tier: "hard", weight: 35 },
+        { tier: "veryHard", weight: 5 },
+      ];
+    }
+
+    if (difficultyScalar < 0.85) {
+      return [
+        { tier: "medium", weight: 15 },
+        { tier: "hard", weight: 50 },
+        { tier: "veryHard", weight: 35 },
       ];
     }
 
     return [
-      { tier: "hard", weight: 55 },
-      { tier: "veryHard", weight: 40 },
-      { tier: "medium", weight: 5 },
+      { tier: "medium", weight: 10 },
+      { tier: "hard", weight: 35 },
+      { tier: "veryHard", weight: 55 },
     ];
   }
 
@@ -1019,6 +1058,7 @@ export class GameService {
         name: player.name,
         connected: player.connected,
         score: player.score,
+        lastWord: player.lastWord,
         lives: player.lives,
         eliminated: player.eliminated,
         joinedAt: player.joinedAt,
@@ -1034,6 +1074,7 @@ export class GameService {
       currentChunk: room.currentChunk,
       currentChunkCoverage: room.currentChunkCoverage,
       currentChunkTier: room.currentChunkTier,
+      difficultyScalar: room.difficultyScalar,
       turnNumber: room.turnNumber,
       turnDurationSeconds: room.turnDurationSeconds,
       remainingMs,

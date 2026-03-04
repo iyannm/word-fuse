@@ -28,6 +28,7 @@ export interface PlayerState {
   socketId: string | null;
   connected: boolean;
   score: number;
+  lastWord: string;
   lives: number;
   eliminated: boolean;
 }
@@ -44,6 +45,7 @@ export interface RoomState {
   currentChunk: string | null;
   currentChunkCoverage: number | null;
   currentChunkTier: ChunkTier | null;
+  difficultyScalar: number | null;
   turnNumber: number;
   turnDurationSeconds: number;
   turnStartedAt: number | null;
@@ -63,6 +65,7 @@ export interface PublicPlayerState {
   name: string;
   connected: boolean;
   score: number;
+  lastWord: string;
   lives: number;
   eliminated: boolean;
   joinedAt: number;
@@ -78,6 +81,7 @@ export interface PublicRoomState {
   currentChunk: string | null;
   currentChunkCoverage: number | null;
   currentChunkTier: ChunkTier | null;
+  difficultyScalar: number | null;
   turnNumber: number;
   turnDurationSeconds: number;
   remainingMs: number;

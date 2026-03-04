@@ -14,6 +14,7 @@ export interface PublicPlayerState {
   name: string;
   connected: boolean;
   score: number;
+  lastWord: string;
   lives: number;
   eliminated: boolean;
   joinedAt: number;
@@ -29,6 +30,7 @@ export interface PublicRoomState {
   currentChunk: string | null;
   currentChunkCoverage: number | null;
   currentChunkTier: ChunkTier | null;
+  difficultyScalar: number | null;
   turnNumber: number;
   turnDurationSeconds: number;
   remainingMs: number;

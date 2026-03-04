@@ -45,7 +45,7 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
   - Auto-bands tiers from coverage percentiles: 0-10, 10-30, 30-60, 60-85, and 85-100
   - Keeps an 8-turn chunk cooldown, with no immediate repeats
 - Match tension and chunk metadata:
-  - Difficulty ramps from easy toward hard/very hard as turn count rises
+  - Chunk preference now oscillates on a 14-turn sine-wave, where `0` means easier-tier bias and `1` means harder-tier bias
   - Independent 10% very-hard injection stays inside the eligible pool
   - Turn duration decays by 1 second every 3 turns from the host's initial timer, never below 5 seconds
   - UI shows chunk subscript metadata as `<Difficulty> | <Nk>`
@@ -53,6 +53,13 @@ Word Fuse is a real-time multiplayer word game inspired by fast bomb-pass gamepl
   - Only the active player's preview is shared with the room
   - Preview text persists for the full active turn once typing starts
   - Host can hide preview text and keep only an `is typing...` indicator
+- Turn-focused game UI:
+  - A turn-order row shows players in join order, with an animated active marker and current turn badge
+  - The local active player gets a large `YOUR TURN` banner and a stronger animated chunk panel
+  - Eliminated players are marked `OUT` in the turn row and scoreboard
+- Scoreboard and validation:
+  - The scoreboard now shows each player's latest valid word and remaining lives
+  - Used words are still tracked and rejected by the server, but the used-words list is no longer shown in the client UI
 - Deterministic clockwise turn order based on lobby join order
 - Eliminated and disconnected players are skipped for active turns
 - Host reassignment on host disconnect (earliest joined connected player)
@@ -208,5 +215,6 @@ If sockets fail in production, re-check:
 - Dictionary never calls external APIs at runtime. It uses local assets plus the bundled `word-list` npm package.
 - Chunk selection uses an 8-turn cooldown queue. If a tier runs dry under cooldown, the oldest chunk in the cooldown window is relaxed first, but immediate repeats remain disallowed.
 - Difficulty tiers are computed from coverage percentiles on the final eligible chunk pool after filtering and any cap/downselection.
+- Difficulty preference follows a repeating sine wave with a 14-turn period, so chunk pressure rises and falls instead of only getting harder.
 - Turn time shown in the UI is the current turn's authoritative duration, not just the host's initial timer slider value.
-- Server broadcasts room/game state at 4Hz during active matches for consistent timer updates.
+- The client now animates the visible countdown locally between authoritative turn changes, which keeps the timer responsive without rebroadcasting the full room state every tick.

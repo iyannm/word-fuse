@@ -302,10 +302,169 @@ function LobbyView(props: LobbyViewProps): JSX.Element {
   );
 }
 
+function TurnMarkerIcon(): JSX.Element {
+  return (
+    <svg
+      className="turn-marker-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 2 14.7 8.3 21 11l-6.3 2.7L12 20l-2.7-6.3L3 11l6.3-2.7Z" />
+    </svg>
+  );
+}
+
+function CountdownClock(props: { remainingMs: number; turnNumber: number }): JSX.Element {
+  const [secondsLeft, setSecondsLeft] = useState(() => Math.max(0, Math.ceil(props.remainingMs / 1000)));
+
+  useEffect(() => {
+    const endAt = Date.now() + props.remainingMs;
+
+    const updateClock = (): void => {
+      setSecondsLeft(Math.max(0, Math.ceil((endAt - Date.now()) / 1000)));
+    };
+
+    updateClock();
+    const intervalId = window.setInterval(updateClock, 100);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [props.remainingMs, props.turnNumber]);
+
+  return <div className={secondsLeft <= 3 ? "timer danger" : "timer"}>{secondsLeft}s</div>;
+}
+
+interface TurnOrderRowProps {
+  roomState: PublicRoomState;
+  session: Session;
+}
+
+function TurnOrderRow(props: TurnOrderRowProps): JSX.Element {
+  return (
+    <div className="turn-row" role="list" aria-label="Turn order">
+      {props.roomState.players.map((player, index) => {
+        const isActive = player.id === props.roomState.activePlayerId;
+        const isLocalPlayer = player.id === props.session.playerId;
+        const isEliminated = player.eliminated || player.lives <= 0;
+
+        return (
+          <div
+            key={player.id}
+            className={[
+              "turn-chip",
+              isActive ? "active" : "",
+              isLocalPlayer ? "you" : "",
+              isEliminated ? "eliminated" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            role="listitem"
+          >
+            <div className="turn-chip-main">
+              {isActive ? (
+                <TurnMarkerIcon />
+              ) : (
+                <span className="turn-chip-order">{index + 1}</span>
+              )}
+              <span className="turn-chip-name">{player.name}</span>
+              {isActive ? <span className="turn-chip-counter">#{props.roomState.turnNumber}</span> : null}
+            </div>
+            <div className="turn-chip-meta">
+              {isEliminated ? (
+                <span className="turn-chip-flag out">OUT</span>
+              ) : player.lastWord ? (
+                <span className="turn-chip-last">{player.lastWord}</span>
+              ) : (
+                <span className="turn-chip-last subtle">No word yet</span>
+              )}
+              {isLocalPlayer ? <span className="turn-chip-flag you">YOU</span> : null}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+interface ScoreboardPanelProps {
+  title: string;
+  roomState: PublicRoomState;
+  session: Session;
+  isHost?: boolean;
+  onToggleTypingPreviews?: (enabled: boolean) => void;
+}
+
+function ScoreboardPanel(props: ScoreboardPanelProps): JSX.Element {
+  return (
+    <div className="panel scoreboard-panel">
+      <div className="scoreboard-header">
+        <h3>{props.title}</h3>
+        {props.onToggleTypingPreviews ? (
+          props.isHost ? (
+            <label className="checkbox-row typing-settings compact">
+              <input
+                type="checkbox"
+                checked={props.roomState.config.showTypingPreviews}
+                onChange={(event) => props.onToggleTypingPreviews?.(event.target.checked)}
+              />
+              Show live typing previews
+            </label>
+          ) : (
+            <p className="small-note">
+              Typing previews: {props.roomState.config.showTypingPreviews ? "On" : "Hidden"}
+            </p>
+          )
+        ) : null}
+      </div>
+
+      <div className="scoreboard-grid scoreboard-head" aria-hidden="true">
+        <span>Name</span>
+        <span>Last Word</span>
+        <span>Lives</span>
+      </div>
+
+      <div className="scoreboard-list">
+        {sortedScoreboard(props.roomState.players).map((player) => {
+          const isEliminated = player.eliminated || player.lives <= 0;
+
+          return (
+            <div
+              key={player.id}
+              className={[
+                "scoreboard-grid",
+                "scoreboard-row",
+                isEliminated ? "eliminated" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <div className="scoreboard-name-cell">
+                <span className="player-name">{player.name}</span>
+                {player.id === props.session.playerId ? <span className="tag">You</span> : null}
+                {player.id === props.roomState.activePlayerId ? <span className="tag active">Turn</span> : null}
+                {isEliminated ? <span className="tag eliminated">OUT</span> : null}
+              </div>
+              <div className="scoreboard-word">{player.lastWord || "--"}</div>
+              <div className="scoreboard-lives">{player.lives}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface GameViewProps {
   session: Session;
   roomState: PublicRoomState;
   typingState: TypingState;
+  localPlayer: PublicPlayerState | null;
   wordDraft: string;
   onWordDraft: (value: string) => void;
   onSubmitWord: (event: FormEvent) => void;
@@ -324,12 +483,14 @@ function GameView(props: GameViewProps): JSX.Element {
   const typingPlayer = props.roomState.players.find(
     (player) => player.id === (props.typingState.activePlayerId ?? props.roomState.activePlayerId),
   );
-  const secondsLeft = Math.max(0, Math.ceil(props.roomState.remainingMs / 1000));
-  const liveAttemptPreview = props.typingState.text || "...";
   const chunkTierLabel = props.roomState.currentChunkTier
     ? TIER_LABELS[props.roomState.currentChunkTier]
     : null;
   const chunkCoverageLabel = formatCoverageK(props.roomState.currentChunkCoverage);
+  const activeTurnLabel = activePlayer ? `${activePlayer.name}'s turn` : "Waiting for turn";
+  const typingPreviewText = props.roomState.config.showTypingPreviews
+    ? props.typingState.text || "..."
+    : "typing...";
 
   return (
     <section className="view-card">
@@ -338,14 +499,33 @@ function GameView(props: GameViewProps): JSX.Element {
         <div className="room-code">Room: {props.roomState.roomCode}</div>
       </div>
 
-      {props.isYourTurn ? (
-        <div className="turn-callout" role="status" aria-live="polite">
-          <span className="turn-callout-mark">GO!</span>
-          <span>Your Turn</span>
+      <TurnOrderRow roomState={props.roomState} session={props.session} />
+
+      {props.localPlayer?.eliminated ? (
+        <div className="player-state-banner out-banner" role="status" aria-live="polite">
+          You Are Out
         </div>
       ) : null}
 
-      <div className={props.isYourTurn ? "bomb-area active-turn" : "bomb-area"}>
+      <div
+        className={[
+          "turn-callout",
+          props.isYourTurn ? "your-turn" : "spectator-turn",
+        ].join(" ")}
+        role="status"
+        aria-live="polite"
+      >
+        {props.isYourTurn ? (
+          <>
+            <span className="turn-callout-mark">YOUR</span>
+            <span>TURN</span>
+          </>
+        ) : (
+          <span>{activeTurnLabel}</span>
+        )}
+      </div>
+
+      <div className={props.isYourTurn ? "bomb-area local-turn" : "bomb-area spectator-turn"}>
         <div className="chunk-stack">
           <div className="chunk">{props.roomState.currentChunk ?? "--"}</div>
           {chunkTierLabel ? (
@@ -354,40 +534,40 @@ function GameView(props: GameViewProps): JSX.Element {
             </div>
           ) : null}
         </div>
-        <div className={secondsLeft <= 3 ? "timer danger" : "timer"}>{secondsLeft}s</div>
+        <CountdownClock
+          remainingMs={props.roomState.remainingMs}
+          turnNumber={props.roomState.turnNumber}
+        />
         <div className="turn-pill-row">
           <span className="turn-pill">Turn {props.roomState.turnNumber}</span>
           <span className="turn-pill">{props.roomState.turnDurationSeconds}s turn</span>
           <span className="turn-pill">
             {props.roomState.config.allowFourLetterChunks ? "2-4 letters" : "2-3 letters"}
           </span>
+          {props.roomState.difficultyScalar !== null ? (
+            <span className="turn-pill">Wave {Math.round(props.roomState.difficultyScalar * 100)}%</span>
+          ) : null}
         </div>
-        <div className="active-player">Active: {activePlayer?.name ?? "Waiting"}</div>
       </div>
 
       <div
-        className={
-          props.typingState.isTyping
-            ? props.roomState.config.showTypingPreviews
-              ? "typing-status"
-              : "typing-status preview-hidden"
-            : "typing-status idle"
-        }
+        className={[
+          "typing-status",
+          props.typingState.isTyping ? "live" : "idle",
+          props.typingState.isTyping && !props.roomState.config.showTypingPreviews
+            ? "preview-hidden"
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
         aria-live="polite"
       >
-        <div className="typing-label">Live Attempt</div>
-        {props.typingState.isTyping && typingPlayer ? (
-          props.roomState.config.showTypingPreviews ? (
-            <>
-              <div className="typing-copy">{typingPlayer.name} typing:</div>
-              <div className="typing-preview">{liveAttemptPreview}</div>
-            </>
-          ) : (
-            <div className="typing-copy">{typingPlayer.name} is typing...</div>
-          )
-        ) : (
-          <div className="typing-copy subtle">Waiting for input...</div>
-        )}
+        <div className="typing-label">
+          {typingPlayer ? `${typingPlayer.name} live attempt` : "Live Attempt"}
+        </div>
+        <div className={props.typingState.isTyping ? "typing-preview large" : "typing-preview subtle"}>
+          {props.typingState.isTyping ? typingPreviewText : "Waiting for input..."}
+        </div>
       </div>
 
       <form className="word-form" onSubmit={props.onSubmitWord}>
@@ -397,7 +577,7 @@ function GameView(props: GameViewProps): JSX.Element {
           value={props.wordDraft}
           onChange={(event) => props.onWordDraft(event.target.value)}
           maxLength={30}
-          placeholder={props.canSubmit ? "Type a word" : "Type to practice while you wait"}
+          placeholder={props.canSubmit ? "Type a word" : "Type to practice while you watch"}
           autoCapitalize="none"
           autoCorrect="off"
           autoComplete="off"
@@ -408,62 +588,17 @@ function GameView(props: GameViewProps): JSX.Element {
         </button>
       </form>
 
-      <div className="panel-group">
-        <div className="panel">
-          <h3>Scoreboard</h3>
-          <ul className="player-list">
-            {sortedScoreboard(props.roomState.players).map((player) => (
-              <li key={player.id} className="player-row">
-                <div>
-                  <span className="player-name">{player.name}</span>
-                  {player.id === props.session.playerId ? <span className="tag">You</span> : null}
-                  {player.id === props.roomState.activePlayerId ? <span className="tag active">Bomb</span> : null}
-                  {player.eliminated ? <span className="tag eliminated">Out</span> : null}
-                </div>
-                <span>
-                  {player.score} pts | {player.lives} lives
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      <ScoreboardPanel
+        title="Scoreboard"
+        roomState={props.roomState}
+        session={props.session}
+        isHost={props.isHost}
+        onToggleTypingPreviews={props.onToggleTypingPreviews}
+      />
 
-        <div className="panel">
-          {props.isHost ? (
-            <label className="checkbox-row typing-settings">
-              <input
-                type="checkbox"
-                checked={props.roomState.config.showTypingPreviews}
-                onChange={(event) => props.onToggleTypingPreviews(event.target.checked)}
-              />
-              Show live typing previews
-            </label>
-          ) : (
-            <p className="small-note">
-              Typing previews: {props.roomState.config.showTypingPreviews ? "On" : "Hidden"}
-            </p>
-          )}
-
-          <h3>Used Words ({props.roomState.usedWords.length})</h3>
-          <div className="used-words">
-            {props.roomState.usedWords.length === 0 ? (
-              <p className="small-note">No words yet.</p>
-            ) : (
-              props.roomState.usedWords
-                .slice()
-                .reverse()
-                .map((word, index) => (
-                  <div key={`${word}-${index}`} className="used-word-item">
-                    {word}
-                  </div>
-                ))
-            )}
-          </div>
-          <button type="button" className="secondary" onClick={props.onLeave}>
-            Leave Room
-          </button>
-        </div>
-      </div>
+      <button type="button" className="secondary" onClick={props.onLeave}>
+        Leave Room
+      </button>
     </section>
   );
 }
@@ -491,22 +626,11 @@ function ResultsView(props: ResultsViewProps): JSX.Element {
         <h3>{winner?.name ?? "No winner"}</h3>
       </div>
 
-      <div className="panel">
-        <h3>Final Scoreboard</h3>
-        <ul className="player-list">
-          {sortedScoreboard(props.roomState.players).map((player) => (
-            <li key={player.id} className="player-row">
-              <div>
-                <span className="player-name">{player.name}</span>
-                {player.id === props.session.playerId ? <span className="tag">You</span> : null}
-              </div>
-              <span>
-                {player.score} pts | {player.lives} lives
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <ScoreboardPanel
+        title="Final Scoreboard"
+        roomState={props.roomState}
+        session={props.session}
+      />
 
       <div className="actions-row">
         {props.isHost ? (
@@ -1032,6 +1156,7 @@ export default function App(): JSX.Element {
           session={session}
           roomState={roomState}
           typingState={typingState}
+          localPlayer={me}
           wordDraft={wordDraft}
           onWordDraft={handleWordDraftChange}
           onSubmitWord={handleSubmitWord}
